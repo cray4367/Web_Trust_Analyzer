@@ -40,3 +40,4 @@ logs/
 
 # Build
 build/
+venv/

@@ -3,12 +3,14 @@ package main
 import (
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 )
+
+// Global firewall instance
+var fw *Firewall
 
 func main() {
 	// Load environment variables
@@ -25,19 +27,26 @@ func main() {
 
 	router := gin.Default()
 
-	// CORS middleware - configure for your frontend
+	// CORS middleware - MUST BE FIRST
 	router.Use(CORSMiddleware())
 
-	// Initialize firewall middleware
-	fw := NewFirewall(FirewallConfig{
-		RateLimitWindow:   60,  // 60 seconds
-		RateLimitMax:      100, // 100 requests per window
-		EnableCSRF:        true,
-		EnableXSS:         true,
-		EnableSQLi:        true,
+	// Initialize firewall global instance
+	fw = NewFirewall(FirewallConfig{
+		RateLimitWindow:     60,
+		RateLimitMax:        100,
+		EnableCSRF:          true,
+		EnableXSS:           true,
+		EnableSQLi:          true,
 		EnablePathTraversal: true,
-		BlockSuspicious:   true,
+		BlockSuspicious:     true,
 	})
+
+	// Load Whitelist from DB into Memory
+	whitelist, _ := GetWhitelistFromDB()
+	for _, ip := range whitelist {
+		fw.AddToWhitelist(ip)
+	}
+	fmt.Printf("✅ Whitelisted IPs loaded: %v\n", whitelist)
 
 	// Apply firewall middleware globally
 	router.Use(fw.SecurityHeaders())
@@ -53,20 +62,20 @@ func main() {
 		api.GET("/events", GetSecurityEvents)
 		api.GET("/events/:id", GetSecurityEvent)
 		api.GET("/events/stats", GetEventStats)
-		
+
 		// Rate limiting
 		api.GET("/ratelimit/status", GetRateLimitStatus)
 		api.POST("/ratelimit/config", UpdateRateLimitConfig)
 		api.GET("/ratelimit/blocked", GetBlockedIPs)
-		
+
 		// Firewall configuration
 		api.GET("/config", GetFirewallConfig)
 		api.POST("/config", UpdateFirewallConfig)
-		
+
 		// Real-time monitoring
 		api.GET("/monitor/live", GetLiveMetrics)
 		api.GET("/monitor/threats", GetThreatAnalysis)
-		
+
 		// IP management
 		api.POST("/ip/whitelist", AddToWhitelist)
 		api.POST("/ip/blacklist", AddToBlacklist)
@@ -74,7 +83,7 @@ func main() {
 		api.DELETE("/ip/blacklist/:ip", RemoveFromBlacklist)
 		api.GET("/ip/whitelist", GetWhitelist)
 		api.GET("/ip/blacklist", GetBlacklist)
-		
+
 		// OWASP checks
 		api.GET("/owasp/status", GetOWASPStatus)
 		api.GET("/owasp/violations", GetOWASPViolations)
@@ -85,13 +94,11 @@ func main() {
 
 	port := os.Getenv("FIREWALL_PORT")
 	if port == "" {
-		port = "8080"
+		port = "5173"
 	}
 
 	fmt.Printf("🛡️  Web Trust Analyzer Firewall starting on port %s\n", port)
-	fmt.Println("📊 Dashboard API available at /api")
-	fmt.Println("🔒 Protected app proxied at /app")
-	
+
 	if err := router.Run(":" + port); err != nil {
 		log.Fatal("Failed to start firewall:", err)
 	}
@@ -99,13 +106,15 @@ func main() {
 
 func CORSMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		// Allow requests from your React Frontend
+		c.Writer.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
 		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
 		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE")
 
+		// Handle browser "Pre-check" (OPTIONS) requests immediately
 		if c.Request.Method == "OPTIONS" {
-			c.AbortWithStatus(204)
+			c.AbortWithStatus(204) // Reply "OK" and stop processing
 			return
 		}
 

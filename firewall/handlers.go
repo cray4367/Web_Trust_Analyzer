@@ -32,16 +32,16 @@ func GetSecurityEvents(c *gin.Context) {
 // Get single security event
 func GetSecurityEvent(c *gin.Context) {
 	id := c.Param("id")
-	
+
 	var event SecurityEvent
 	query := `SELECT id, type, severity, ip, path, method, user_agent, details, payload, timestamp 
-			  FROM security_events WHERE id = ?`
-	
+              FROM security_events WHERE id = ?`
+
 	err := db.QueryRow(query, id).Scan(
-		&event.ID, &event.Type, &event.Severity, &event.IP, &event.Path, 
+		&event.ID, &event.Type, &event.Severity, &event.IP, &event.Path,
 		&event.Method, &event.UserAgent, &event.Details, &event.Payload, &event.Timestamp,
 	)
-	
+
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Event not found"})
 		return
@@ -63,8 +63,7 @@ func GetEventStats(c *gin.Context) {
 
 // Get rate limit status
 func GetRateLimitStatus(c *gin.Context) {
-	// This would normally come from the firewall instance
-	// For now, return mock data structure
+	// Return mock data structure or real data if you expand the Firewall struct
 	c.JSON(http.StatusOK, gin.H{
 		"active_limits": 0,
 		"blocked_ips":   []string{},
@@ -114,58 +113,39 @@ func GetBlockedIPs(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"blocked_ips": ips})
 }
 
-// Get firewall config
+// Get firewall config (UPDATED for global fw)
 func GetFirewallConfig(c *gin.Context) {
-	rows, err := db.Query("SELECT key, value FROM firewall_config")
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	defer rows.Close()
-
-	config := make(map[string]string)
-	for rows.Next() {
-		var key, value string
-		if err := rows.Scan(&key, &value); err == nil {
-			config[key] = value
-		}
-	}
-
-	c.JSON(http.StatusOK, config)
+	// Retrieve config from memory (the source of truth)
+	c.JSON(http.StatusOK, fw.GetConfig())
 }
 
-// Update firewall config
+// Update firewall config (UPDATED for global fw)
 func UpdateFirewallConfig(c *gin.Context) {
-	var configMap map[string]interface{}
-	if err := c.BindJSON(&configMap); err != nil {
+	var config FirewallConfig
+	if err := c.BindJSON(&config); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	for key, value := range configMap {
-		_, err := db.Exec("INSERT OR REPLACE INTO firewall_config (key, value) VALUES (?, ?)", key, value)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-	}
+	// Update the global firewall instance immediately
+	fw.UpdateConfig(config)
 
-	c.JSON(http.StatusOK, gin.H{"message": "Configuration updated"})
+	c.JSON(http.StatusOK, gin.H{"message": "Configuration updated", "config": config})
 }
 
 // Get live metrics
 func GetLiveMetrics(c *gin.Context) {
 	stats, _ := GetEventStatsFromDB()
-	
+
 	// Get recent requests
 	recentLogs, _ := GetRequestLogsFromDB(10, 0)
 
 	c.JSON(http.StatusOK, gin.H{
-		"total_events":    stats.TotalEvents,
+		"total_events":     stats.TotalEvents,
 		"events_last_hour": stats.EventsLastHour,
 		"events_last_24h":  stats.EventsLast24h,
-		"critical_events": stats.CriticalEvents,
-		"recent_requests": recentLogs,
+		"critical_events":  stats.CriticalEvents,
+		"recent_requests":  recentLogs,
 	})
 }
 
@@ -178,8 +158,8 @@ func GetThreatAnalysis(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"events_by_type":  stats.EventsByType,
-		"top_attackers":   stats.TopAttackers,
+		"events_by_type": stats.EventsByType,
+		"top_attackers":  stats.TopAttackers,
 		"severity_breakdown": gin.H{
 			"critical": stats.CriticalEvents,
 			"high":     stats.HighEvents,
@@ -194,7 +174,7 @@ func AddToWhitelist(c *gin.Context) {
 	var req struct {
 		IP string `json:"ip" binding:"required"`
 	}
-	
+
 	if err := c.BindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -205,6 +185,9 @@ func AddToWhitelist(c *gin.Context) {
 		return
 	}
 
+	// Also update running firewall
+	fw.AddToWhitelist(req.IP)
+
 	c.JSON(http.StatusOK, gin.H{"message": "IP added to whitelist"})
 }
 
@@ -213,7 +196,7 @@ func AddToBlacklist(c *gin.Context) {
 		IP     string `json:"ip" binding:"required"`
 		Reason string `json:"reason"`
 	}
-	
+
 	if err := c.BindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -224,27 +207,36 @@ func AddToBlacklist(c *gin.Context) {
 		return
 	}
 
+	// Also update running firewall
+	fw.AddToBlacklist(req.IP)
+
 	c.JSON(http.StatusOK, gin.H{"message": "IP added to blacklist"})
 }
 
 func RemoveFromWhitelist(c *gin.Context) {
 	ip := c.Param("ip")
-	
+
 	if err := RemoveIPFromWhitelist(ip); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+
+	// Also update running firewall
+	fw.RemoveFromWhitelist(ip)
 
 	c.JSON(http.StatusOK, gin.H{"message": "IP removed from whitelist"})
 }
 
 func RemoveFromBlacklist(c *gin.Context) {
 	ip := c.Param("ip")
-	
+
 	if err := RemoveIPFromBlacklist(ip); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+
+	// Also update running firewall
+	fw.RemoveFromBlacklist(ip)
 
 	c.JSON(http.StatusOK, gin.H{"message": "IP removed from blacklist"})
 }
@@ -290,7 +282,7 @@ func GetOWASPStatus(c *gin.Context) {
 // OWASP violations
 func GetOWASPViolations(c *gin.Context) {
 	events, _ := GetSecurityEventsFromDB(100, 0, "")
-	
+
 	violations := make(map[string]int)
 	violations["SQL_INJECTION"] = 0
 	violations["XSS_ATTEMPT"] = 0

@@ -15,24 +15,24 @@ import (
 )
 
 type FirewallConfig struct {
-	RateLimitWindow     int
-	RateLimitMax        int
-	EnableCSRF          bool
-	EnableXSS           bool
-	EnableSQLi          bool
-	EnablePathTraversal bool
-	BlockSuspicious     bool
+	RateLimitWindow     int  `json:"rate_limit_window"`
+	RateLimitMax        int  `json:"rate_limit_max"`
+	EnableCSRF          bool `json:"enable_csrf"`
+	EnableXSS           bool `json:"enable_xss"`
+	EnableSQLi          bool `json:"enable_sqli"`
+	EnablePathTraversal bool `json:"enable_path_traversal"`
+	BlockSuspicious     bool `json:"block_suspicious"`
 }
 
 type Firewall struct {
-	config          FirewallConfig
-	rateLimitStore  map[string]*RateLimitEntry
-	mutex           sync.RWMutex
-	whitelist       map[string]bool
-	blacklist       map[string]bool
-	suspiciousPatterns []*regexp.Regexp
-	sqlPatterns     []*regexp.Regexp
-	xssPatterns     []*regexp.Regexp
+	config                FirewallConfig
+	rateLimitStore        map[string]*RateLimitEntry
+	mutex                 sync.RWMutex
+	whitelist             map[string]bool
+	blacklist             map[string]bool
+	suspiciousPatterns    []*regexp.Regexp
+	sqlPatterns           []*regexp.Regexp
+	xssPatterns           []*regexp.Regexp
 	pathTraversalPatterns []*regexp.Regexp
 }
 
@@ -50,7 +50,7 @@ func NewFirewall(config FirewallConfig) *Firewall {
 		blacklist:      make(map[string]bool),
 	}
 
-	// Initialize SQL injection patterns (OWASP #3)
+	// Initialize SQL injection patterns
 	fw.sqlPatterns = []*regexp.Regexp{
 		regexp.MustCompile(`(?i)(\%27)|(\')|(\-\-)|(\%23)|(#)`),
 		regexp.MustCompile(`(?i)((\%3D)|(=))[^\n]*((\%27)|(\')|(\-\-)|(\%3B)|(:))`),
@@ -66,7 +66,7 @@ func NewFirewall(config FirewallConfig) *Firewall {
 		regexp.MustCompile(`(?i);.*(\bDROP\b|\bCREATE\b|\bDELETE\b|\bINSERT\b|\bUPDATE\b)`),
 	}
 
-	// Initialize XSS patterns (OWASP #3)
+	// Initialize XSS patterns
 	fw.xssPatterns = []*regexp.Regexp{
 		regexp.MustCompile(`(?i)<script[^>]*>.*?</script>`),
 		regexp.MustCompile(`(?i)javascript:`),
@@ -82,7 +82,7 @@ func NewFirewall(config FirewallConfig) *Firewall {
 		regexp.MustCompile(`(?i)data:text/html`),
 	}
 
-	// Initialize path traversal patterns (OWASP #1)
+	// Initialize path traversal patterns
 	fw.pathTraversalPatterns = []*regexp.Regexp{
 		regexp.MustCompile(`\.\.\/`),
 		regexp.MustCompile(`\.\.\\`),
@@ -95,48 +95,61 @@ func NewFirewall(config FirewallConfig) *Firewall {
 	return fw
 }
 
-// OWASP #5: Security Misconfiguration - Security Headers
+// UpdateConfig safely updates the firewall configuration
+func (fw *Firewall) UpdateConfig(newConfig FirewallConfig) {
+	fw.mutex.Lock()
+	defer fw.mutex.Unlock()
+	fw.config = newConfig
+}
+
+// GetConfig safely retrieves the current configuration
+func (fw *Firewall) GetConfig() FirewallConfig {
+	fw.mutex.RLock()
+	defer fw.mutex.RUnlock()
+	return fw.config
+}
+
+// Security Headers
 func (fw *Firewall) SecurityHeaders() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Prevent clickjacking
 		c.Header("X-Frame-Options", "DENY")
-		
-		// Prevent MIME sniffing
 		c.Header("X-Content-Type-Options", "nosniff")
-		
-		// XSS Protection
 		c.Header("X-XSS-Protection", "1; mode=block")
-		
-		// Content Security Policy
 		c.Header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:;")
-		
-		// HSTS
 		c.Header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
-		
-		// Referrer Policy
 		c.Header("Referrer-Policy", "strict-origin-when-cross-origin")
-		
-		// Permissions Policy
 		c.Header("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
-		
 		c.Next()
 	}
 }
 
-// Rate Limiter - Prevents brute force and DDoS
+// HELPER: Ensures CORS headers are present when blocking
+func (fw *Firewall) respondBlocked(c *gin.Context, reason string) {
+	c.Header("Access-Control-Allow-Origin", "http://localhost:3000")
+	c.Header("Access-Control-Allow-Credentials", "true")
+	c.JSON(http.StatusBadRequest, gin.H{"error": reason})
+	c.Abort()
+}
+
+// Rate Limiter
 func (fw *Firewall) RateLimiter() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if c.Request.Method == "OPTIONS" {
+			c.Next()
+			return
+		}
+
 		clientIP := c.ClientIP()
-		
-		// Check if IP is whitelisted
 		fw.mutex.RLock()
+		limitWindow := fw.config.RateLimitWindow
+		limitMax := fw.config.RateLimitMax
+
 		if fw.whitelist[clientIP] {
 			fw.mutex.RUnlock()
 			c.Next()
 			return
 		}
-		
-		// Check if IP is blacklisted
+
 		if fw.blacklist[clientIP] {
 			fw.mutex.RUnlock()
 			LogSecurityEvent(SecurityEvent{
@@ -149,28 +162,25 @@ func (fw *Firewall) RateLimiter() gin.HandlerFunc {
 				Details:   "Request from blacklisted IP",
 				Timestamp: time.Now(),
 			})
+			c.Header("Access-Control-Allow-Origin", "http://localhost:3000")
+			c.Header("Access-Control-Allow-Credentials", "true")
 			c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
 			c.Abort()
 			return
 		}
 		fw.mutex.RUnlock()
-		
+
 		fw.mutex.Lock()
 		entry, exists := fw.rateLimitStore[clientIP]
-		
+
 		if !exists {
-			fw.rateLimitStore[clientIP] = &RateLimitEntry{
-				Count:     1,
-				StartTime: time.Now(),
-				Blocked:   false,
-			}
+			fw.rateLimitStore[clientIP] = &RateLimitEntry{Count: 1, StartTime: time.Now(), Blocked: false}
 			fw.mutex.Unlock()
 			c.Next()
 			return
 		}
-		
-		// Check if window has expired
-		if time.Since(entry.StartTime).Seconds() > float64(fw.config.RateLimitWindow) {
+
+		if time.Since(entry.StartTime).Seconds() > float64(limitWindow) {
 			entry.Count = 1
 			entry.StartTime = time.Now()
 			entry.Blocked = false
@@ -178,15 +188,12 @@ func (fw *Firewall) RateLimiter() gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		
-		// Increment counter
+
 		entry.Count++
-		
-		// Check if limit exceeded
-		if entry.Count > fw.config.RateLimitMax {
+		if entry.Count > limitMax {
 			if !entry.Blocked {
 				entry.Blocked = true
-				LogSecurityEvent(SecurityEvent{
+				go LogSecurityEvent(SecurityEvent{
 					Type:      "RATE_LIMIT_EXCEEDED",
 					Severity:  "HIGH",
 					IP:        clientIP,
@@ -198,113 +205,124 @@ func (fw *Firewall) RateLimiter() gin.HandlerFunc {
 				})
 			}
 			fw.mutex.Unlock()
-			
-			c.JSON(http.StatusTooManyRequests, gin.H{
-				"error": "Too many requests",
-				"retry_after": fw.config.RateLimitWindow,
-			})
+			c.Header("Access-Control-Allow-Origin", "http://localhost:3000")
+			c.Header("Access-Control-Allow-Credentials", "true")
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": "Too many requests", "retry_after": limitWindow})
 			c.Abort()
 			return
 		}
-		
+
 		fw.mutex.Unlock()
 		c.Next()
 	}
 }
 
-// Input Validator - Validates and sanitizes input
+// Input Validator
 func (fw *Firewall) InputValidator() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Check URL parameters
-		for key, values := range c.Request.URL.Query() {
+		if c.Request.Method == "OPTIONS" {
+			c.Next()
+			return
+		}
+
+		fw.mutex.RLock()
+		enablePath := fw.config.EnablePathTraversal
+		fw.mutex.RUnlock()
+
+		if !enablePath {
+			c.Next()
+			return
+		}
+
+		for _, values := range c.Request.URL.Query() {
 			for _, value := range values {
-				if fw.config.EnablePathTraversal && fw.checkPathTraversal(value) {
+				if fw.checkPathTraversal(value) {
 					fw.logThreat(c, "PATH_TRAVERSAL", "Attempt", value)
-					c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input detected"})
-					c.Abort()
+					fw.respondBlocked(c, "Invalid input detected")
 					return
 				}
 			}
 		}
-		
-		// Check path for traversal
-		if fw.config.EnablePathTraversal && fw.checkPathTraversal(c.Request.URL.Path) {
+
+		if fw.checkPathTraversal(c.Request.URL.Path) {
 			fw.logThreat(c, "PATH_TRAVERSAL", "Attempt in URL path", c.Request.URL.Path)
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid path"})
-			c.Abort()
+			fw.respondBlocked(c, "Invalid path")
 			return
 		}
-		
+
 		c.Next()
 	}
 }
 
-// Threat Detector - Detects SQL injection, XSS, and other attacks
+// Threat Detector
 func (fw *Firewall) ThreatDetector() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Read body if present
+		if c.Request.Method == "OPTIONS" {
+			c.Next()
+			return
+		}
+
+		fw.mutex.RLock()
+		enableSQLi := fw.config.EnableSQLi
+		enableXSS := fw.config.EnableXSS
+		fw.mutex.RUnlock()
+
+		if !enableSQLi && !enableXSS {
+			c.Next()
+			return
+		}
+
 		var bodyBytes []byte
 		if c.Request.Body != nil {
 			bodyBytes, _ = io.ReadAll(c.Request.Body)
 			c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 		}
-		
 		bodyString := string(bodyBytes)
-		
-		// Check for SQL injection
-		if fw.config.EnableSQLi && fw.checkSQLInjection(bodyString) {
-			fw.logThreat(c, "SQL_INJECTION", "SQL injection attempt detected", bodyString)
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input detected"})
-			c.Abort()
-			return
-		}
-		
-		// Check URL parameters for SQL injection
-		for _, values := range c.Request.URL.Query() {
-			for _, value := range values {
-				if fw.config.EnableSQLi && fw.checkSQLInjection(value) {
-					fw.logThreat(c, "SQL_INJECTION", "SQL injection in URL parameter", value)
-					c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input detected"})
-					c.Abort()
-					return
+
+		if enableSQLi {
+			if fw.checkSQLInjection(bodyString) {
+				fw.logThreat(c, "SQL_INJECTION", "SQL injection attempt detected", bodyString)
+				fw.respondBlocked(c, "Invalid input detected")
+				return
+			}
+			for _, values := range c.Request.URL.Query() {
+				for _, value := range values {
+					if fw.checkSQLInjection(value) {
+						fw.logThreat(c, "SQL_INJECTION", "SQL injection in URL parameter", value)
+						fw.respondBlocked(c, "Invalid input detected")
+						return
+					}
 				}
 			}
 		}
-		
-		// Check for XSS
-		if fw.config.EnableXSS && fw.checkXSS(bodyString) {
-			fw.logThreat(c, "XSS_ATTEMPT", "XSS attempt detected", bodyString)
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input detected"})
-			c.Abort()
-			return
-		}
-		
-		// Check URL parameters for XSS
-		for _, values := range c.Request.URL.Query() {
-			for _, value := range values {
-				if fw.config.EnableXSS && fw.checkXSS(value) {
-					fw.logThreat(c, "XSS_ATTEMPT", "XSS in URL parameter", value)
-					c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input detected"})
-					c.Abort()
-					return
+
+		if enableXSS {
+			if fw.checkXSS(bodyString) {
+				fw.logThreat(c, "XSS_ATTEMPT", "XSS attempt detected", bodyString)
+				fw.respondBlocked(c, "Invalid input detected")
+				return
+			}
+			for _, values := range c.Request.URL.Query() {
+				for _, value := range values {
+					if fw.checkXSS(value) {
+						fw.logThreat(c, "XSS_ATTEMPT", "XSS in URL parameter", value)
+						fw.respondBlocked(c, "Invalid input detected")
+						return
+					}
 				}
 			}
 		}
-		
 		c.Next()
 	}
 }
 
-// Request Logger - Logs all requests
+// Request Logger
 func (fw *Firewall) RequestLogger() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
-		
 		c.Next()
-		
 		duration := time.Since(start)
-		
-		LogRequest(RequestLog{
+		go LogRequest(RequestLog{
 			IP:         c.ClientIP(),
 			Method:     c.Request.Method,
 			Path:       c.Request.URL.Path,
@@ -358,36 +376,36 @@ func (fw *Firewall) logThreat(c *gin.Context, threatType, details, payload strin
 	})
 }
 
-// Proxy Middleware - Proxies requests to the main app
+// Proxy Middleware
 func (fw *Firewall) ProxyMiddleware(targetURL string) gin.HandlerFunc {
 	target, _ := url.Parse(targetURL)
 	proxy := httputil.NewSingleHostReverseProxy(target)
-	
+
 	return func(c *gin.Context) {
-		c.Request.URL.Path = strings.TrimPrefix(c.Request.URL.Path, "/app")
-		proxy.ServeHTTP(c.Writer, c.Request)
+		// Only proxy if we haven't aborted (blocked) yet
+		if !c.IsAborted() {
+			c.Request.URL.Path = strings.TrimPrefix(c.Request.URL.Path, "/app")
+			proxy.ServeHTTP(c.Writer, c.Request)
+		}
 	}
 }
 
-// IP Management
+// IP Management methods (Keep existing)
 func (fw *Firewall) AddToWhitelist(ip string) {
 	fw.mutex.Lock()
 	defer fw.mutex.Unlock()
 	fw.whitelist[ip] = true
 }
-
 func (fw *Firewall) AddToBlacklist(ip string) {
 	fw.mutex.Lock()
 	defer fw.mutex.Unlock()
 	fw.blacklist[ip] = true
 }
-
 func (fw *Firewall) RemoveFromWhitelist(ip string) {
 	fw.mutex.Lock()
 	defer fw.mutex.Unlock()
 	delete(fw.whitelist, ip)
 }
-
 func (fw *Firewall) RemoveFromBlacklist(ip string) {
 	fw.mutex.Lock()
 	defer fw.mutex.Unlock()

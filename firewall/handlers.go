@@ -63,18 +63,20 @@ func GetEventStats(c *gin.Context) {
 
 // Get rate limit status
 func GetRateLimitStatus(c *gin.Context) {
-	// Return mock data structure or real data if you expand the Firewall struct
+	// Return the REAL config from the active firewall instance
+	config := fw.GetConfig()
+	
 	c.JSON(http.StatusOK, gin.H{
-		"active_limits": 0,
-		"blocked_ips":   []string{},
+		"active_limits": 0, // You could expand RateLimitEntry to count these if needed
+		"blocked_ips":   []string{}, // Placeholder, or fetch from fw.blacklist
 		"config": gin.H{
-			"window_seconds": 60,
-			"max_requests":   100,
+			"window_seconds": config.RateLimitWindow,
+			"max_requests":   config.RateLimitMax,
 		},
 	})
 }
 
-// Update rate limit config
+// Update rate limit config (UPDATED: Now updates Live Firewall)
 func UpdateRateLimitConfig(c *gin.Context) {
 	var config struct {
 		WindowSeconds int `json:"window_seconds"`
@@ -86,20 +88,31 @@ func UpdateRateLimitConfig(c *gin.Context) {
 		return
 	}
 
-	// Save to database
+	// 1. Save to Database
 	_, err := db.Exec("INSERT OR REPLACE INTO firewall_config (key, value) VALUES ('rate_limit_window', ?)", strconv.Itoa(config.WindowSeconds))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
 	_, err = db.Exec("INSERT OR REPLACE INTO firewall_config (key, value) VALUES ('rate_limit_max', ?)", strconv.Itoa(config.MaxRequests))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "Configuration updated"})
+	// 2. UPDATE LIVE FIREWALL INSTANCE
+	// Retrieve current config
+	currentConfig := fw.GetConfig()
+	// Update relevant fields
+	currentConfig.RateLimitWindow = config.WindowSeconds
+	currentConfig.RateLimitMax = config.MaxRequests
+	// Save back to firewall
+	fw.UpdateConfig(currentConfig)
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Rate limit updated successfully", 
+		"new_config": config,
+	})
 }
 
 // Get blocked IPs
@@ -113,13 +126,12 @@ func GetBlockedIPs(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"blocked_ips": ips})
 }
 
-// Get firewall config (UPDATED for global fw)
+// Get firewall config
 func GetFirewallConfig(c *gin.Context) {
-	// Retrieve config from memory (the source of truth)
 	c.JSON(http.StatusOK, fw.GetConfig())
 }
 
-// Update firewall config (UPDATED for global fw)
+// Update firewall config
 func UpdateFirewallConfig(c *gin.Context) {
 	var config FirewallConfig
 	if err := c.BindJSON(&config); err != nil {
@@ -136,8 +148,6 @@ func UpdateFirewallConfig(c *gin.Context) {
 // Get live metrics
 func GetLiveMetrics(c *gin.Context) {
 	stats, _ := GetEventStatsFromDB()
-
-	// Get recent requests
 	recentLogs, _ := GetRequestLogsFromDB(10, 0)
 
 	c.JSON(http.StatusOK, gin.H{
@@ -174,20 +184,15 @@ func AddToWhitelist(c *gin.Context) {
 	var req struct {
 		IP string `json:"ip" binding:"required"`
 	}
-
 	if err := c.BindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-
 	if err := AddIPToWhitelist(req.IP); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
-	// Also update running firewall
 	fw.AddToWhitelist(req.IP)
-
 	c.JSON(http.StatusOK, gin.H{"message": "IP added to whitelist"})
 }
 
@@ -196,48 +201,35 @@ func AddToBlacklist(c *gin.Context) {
 		IP     string `json:"ip" binding:"required"`
 		Reason string `json:"reason"`
 	}
-
 	if err := c.BindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-
 	if err := AddIPToBlacklist(req.IP, req.Reason); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
-	// Also update running firewall
 	fw.AddToBlacklist(req.IP)
-
 	c.JSON(http.StatusOK, gin.H{"message": "IP added to blacklist"})
 }
 
 func RemoveFromWhitelist(c *gin.Context) {
 	ip := c.Param("ip")
-
 	if err := RemoveIPFromWhitelist(ip); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
-	// Also update running firewall
 	fw.RemoveFromWhitelist(ip)
-
 	c.JSON(http.StatusOK, gin.H{"message": "IP removed from whitelist"})
 }
 
 func RemoveFromBlacklist(c *gin.Context) {
 	ip := c.Param("ip")
-
 	if err := RemoveIPFromBlacklist(ip); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
-	// Also update running firewall
 	fw.RemoveFromBlacklist(ip)
-
 	c.JSON(http.StatusOK, gin.H{"message": "IP removed from blacklist"})
 }
 
@@ -247,7 +239,6 @@ func GetWhitelist(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
 	c.JSON(http.StatusOK, gin.H{"whitelist": ips})
 }
 
@@ -257,7 +248,6 @@ func GetBlacklist(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
 	c.JSON(http.StatusOK, gin.H{"blacklist": ips})
 }
 

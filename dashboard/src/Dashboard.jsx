@@ -118,13 +118,15 @@ const Dashboard = () => {
       const result = await res.json();
 
       if (result.success) {
-        // Log the summary
-        addLog(result.message, 'success');
+        // Log the summary - Red if threats passed, Green if all blocked
+        const summaryType = (result.passed_count > 0) ? 'danger' : 'success';
+        addLog(result.message, summaryType);
 
         // Log details line by line
         result.details.forEach(detail => {
           if (detail.includes("BLOCKED")) addLog(detail, 'success');
           else if (detail.includes("PASSED")) addLog(detail, 'danger');
+          else if (detail.includes("Allowed")) addLog(detail, 'danger'); // Handle older backend response
           else addLog(detail, 'info');
         });
 
@@ -225,7 +227,11 @@ const Dashboard = () => {
                     <span className="code-badge">{event.match_pattern.substring(0, 30)}</span>
                   ) : <span className="text-muted">-</span>}
                 </td>
-                <td><span className="block-status">BLOCKED</span></td>
+                <td>
+                  <span className={`block-status ${event.status === 'PASSED' ? 'status-passed' : 'status-blocked'}`}>
+                    {event.status || 'BLOCKED'}
+                  </span>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -447,7 +453,9 @@ const Dashboard = () => {
         @keyframes pulse-red { 0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); } 70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); } 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); } }
         .attack-btn { width: 100%; padding: 0.75rem; background: #ef4444; color: white; border: none; border-radius: 6px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 0.5rem; transition: all 0.2s; }
         .attack-btn:hover { background: #dc2626; transform: translateY(-2px); box-shadow: 0 4px 12px rgba(239, 68, 68, 0.4); }
-        .block-status { background: rgba(239, 68, 68, 0.2); color: #ef4444; padding: 0.25rem 0.5rem; border-radius: 4px; font-size: 0.7rem; font-weight: bold; }
+        .block-status { padding: 0.25rem 0.5rem; border-radius: 4px; font-size: 0.7rem; font-weight: bold; text-transform: uppercase; }
+        .block-status.status-blocked { background: rgba(16, 185, 129, 0.2); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3); } 
+        .block-status.status-passed { background: rgba(239, 68, 68, 0.2); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3); animation: pulse-red 2s infinite; }
         .system-status-indicator { display: flex; flex-direction: column; align-items: center; text-align: center; padding: 2rem; gap: 1rem; }
         .status-big-icon.safe { color: #10b981; filter: drop-shadow(0 0 10px rgba(16,185,129,0.5)); }
         .status-big-icon.danger { color: #ef4444; filter: drop-shadow(0 0 10px rgba(239,68,68,0.5)); }

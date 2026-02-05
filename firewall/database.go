@@ -20,7 +20,8 @@ type SecurityEvent struct {
 	UserAgent    string    `json:"user_agent"`
 	Details      string    `json:"details"`
 	Payload      string    `json:"payload"`
-	MatchPattern string    `json:"match_pattern"` // New field
+	MatchPattern string    `json:"match_pattern"`
+	Status       string    `json:"status"` // New field: "BLOCKED" or "PASSED"
 	Timestamp    time.Time `json:"timestamp"`
 }
 
@@ -78,7 +79,8 @@ func InitDB() {
         user_agent TEXT,
         details TEXT,
         payload TEXT,
-        match_pattern TEXT, -- New Column
+        match_pattern TEXT,
+        status TEXT DEFAULT 'BLOCKED', -- New Column
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -122,6 +124,8 @@ func InitDB() {
 
 	// Migration for existing tables if they lack match_pattern
 	_, _ = db.Exec("ALTER TABLE security_events ADD COLUMN match_pattern TEXT")
+	// Migration for status
+	_, _ = db.Exec("ALTER TABLE security_events ADD COLUMN status TEXT DEFAULT 'BLOCKED'")
 
 	// --- REMOVED AUTO-WHITELIST so Rate Limit tests work locally ---
 	// _, _ = db.Exec("INSERT OR IGNORE INTO ip_whitelist (ip) VALUES (?)", "::1")
@@ -137,13 +141,12 @@ func CloseDB() {
 	}
 }
 
-// Log security event
 func LogSecurityEvent(event SecurityEvent) error {
 	query := `
-        INSERT INTO security_events (type, severity, ip, path, method, user_agent, details, payload, match_pattern, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO security_events (type, severity, ip, path, method, user_agent, details, payload, match_pattern, status, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `
-	_, err := db.Exec(query, event.Type, event.Severity, event.IP, event.Path, event.Method, event.UserAgent, event.Details, event.Payload, event.MatchPattern, event.Timestamp)
+	_, err := db.Exec(query, event.Type, event.Severity, event.IP, event.Path, event.Method, event.UserAgent, event.Details, event.Payload, event.MatchPattern, event.Status, event.Timestamp)
 	if err != nil {
 		log.Printf("Error logging security event: %v", err)
 		return err
@@ -165,7 +168,7 @@ func LogRequest(reqLog RequestLog) error {
 func GetSecurityEventsFromDB(limit, offset int, severity string) ([]SecurityEvent, error) {
 	var events []SecurityEvent
 
-	query := `SELECT id, type, severity, ip, path, method, user_agent, details, payload, match_pattern, timestamp 
+	query := `SELECT id, type, severity, ip, path, method, user_agent, details, payload, match_pattern, status, timestamp 
               FROM security_events`
 
 	args := []interface{}{}
@@ -186,12 +189,18 @@ func GetSecurityEventsFromDB(limit, offset int, severity string) ([]SecurityEven
 	for rows.Next() {
 		var event SecurityEvent
 		var matchPattern sql.NullString // Handle possible NULLs from old rows
-		err := rows.Scan(&event.ID, &event.Type, &event.Severity, &event.IP, &event.Path, &event.Method, &event.UserAgent, &event.Details, &event.Payload, &matchPattern, &event.Timestamp)
+		var status sql.NullString       // Handle possible NULLs
+		err := rows.Scan(&event.ID, &event.Type, &event.Severity, &event.IP, &event.Path, &event.Method, &event.UserAgent, &event.Details, &event.Payload, &matchPattern, &status, &event.Timestamp)
 		if err != nil {
 			continue
 		}
 		if matchPattern.Valid {
 			event.MatchPattern = matchPattern.String
+		}
+		if status.Valid {
+			event.Status = status.String
+		} else {
+			event.Status = "BLOCKED" // Default for old records
 		}
 		events = append(events, event)
 	}

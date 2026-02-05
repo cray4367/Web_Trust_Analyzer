@@ -114,16 +114,30 @@ func (fw *Firewall) ThreatDetector() gin.HandlerFunc {
 		}
 
 		// CHECK XSS FIRST
-		if enableXSS {
-			if match, pattern := fw.checkXSS(bodyString); match {
-				fw.logThreat(c, "XSS_ATTEMPT", "XSS detected in body", bodyString, pattern)
+		// Always run check to support logging "PASSED" events
+		if match, pattern := fw.checkXSS(bodyString); match {
+			status := "BLOCKED"
+			if !enableXSS {
+				status = "PASSED"
+			}
+			fw.logThreat(c, "XSS_ATTEMPT", "XSS detected in body", bodyString, pattern, status)
+
+			if enableXSS {
 				fw.respondBlocked(c, "XSS Detected")
 				return
 			}
-			for _, values := range c.Request.URL.Query() {
-				for _, value := range values {
-					if match, pattern := fw.checkXSS(value); match {
-						fw.logThreat(c, "XSS_ATTEMPT", "XSS detected in URL", value, pattern)
+		}
+
+		for _, values := range c.Request.URL.Query() {
+			for _, value := range values {
+				if match, pattern := fw.checkXSS(value); match {
+					status := "BLOCKED"
+					if !enableXSS {
+						status = "PASSED"
+					}
+					fw.logThreat(c, "XSS_ATTEMPT", "XSS detected in URL", value, pattern, status)
+
+					if enableXSS {
 						fw.respondBlocked(c, "XSS Detected")
 						return
 					}
@@ -132,16 +146,29 @@ func (fw *Firewall) ThreatDetector() gin.HandlerFunc {
 		}
 
 		// CHECK SQLi SECOND
-		if enableSQLi {
-			if match, pattern := fw.checkSQLInjection(bodyString); match {
-				fw.logThreat(c, "SQL_INJECTION", "SQL injection detected in body", bodyString, pattern)
+		if match, pattern := fw.checkSQLInjection(bodyString); match {
+			status := "BLOCKED"
+			if !enableSQLi {
+				status = "PASSED"
+			}
+			fw.logThreat(c, "SQL_INJECTION", "SQL injection detected in body", bodyString, pattern, status)
+
+			if enableSQLi {
 				fw.respondBlocked(c, "SQL Injection Detected")
 				return
 			}
-			for _, values := range c.Request.URL.Query() {
-				for _, value := range values {
-					if match, pattern := fw.checkSQLInjection(value); match {
-						fw.logThreat(c, "SQL_INJECTION", "SQL injection detected in URL", value, pattern)
+		}
+
+		for _, values := range c.Request.URL.Query() {
+			for _, value := range values {
+				if match, pattern := fw.checkSQLInjection(value); match {
+					status := "BLOCKED"
+					if !enableSQLi {
+						status = "PASSED"
+					}
+					fw.logThreat(c, "SQL_INJECTION", "SQL injection detected in URL", value, pattern, status)
+
+					if enableSQLi {
 						fw.respondBlocked(c, "SQL Injection Detected")
 						return
 					}
@@ -163,14 +190,14 @@ func (fw *Firewall) BotDetector() gin.HandlerFunc {
 
 		for _, agent := range suspiciousAgents {
 			if strings.Contains(strings.ToLower(ua), agent) {
-				fw.logThreat(c, "BOT_DETECTED", "Suspicious User-Agent detected", ua, "User-Agent: "+agent)
+				fw.logThreat(c, "BOT_DETECTED", "Suspicious User-Agent detected", ua, "User-Agent: "+agent, "BLOCKED")
 				fw.respondBlocked(c, "Bot access blocked")
 				return
 			}
 		}
 
 		if ua == "" {
-			fw.logThreat(c, "BOT_DETECTED", "Empty User-Agent", "", "Empty User-Agent")
+			fw.logThreat(c, "BOT_DETECTED", "Empty User-Agent", "", "Empty User-Agent", "BLOCKED")
 			fw.respondBlocked(c, "Bot access blocked")
 			return
 		}
@@ -295,7 +322,7 @@ func (fw *Firewall) InputValidator() gin.HandlerFunc {
 
 		if enabled {
 			if match, pattern := fw.checkPathTraversal(c.Request.URL.Path); match {
-				fw.logThreat(c, "PATH_TRAVERSAL", "Directory traversal attempt", c.Request.URL.Path, pattern)
+				fw.logThreat(c, "PATH_TRAVERSAL", "Directory traversal attempt", c.Request.URL.Path, pattern, "BLOCKED")
 				fw.respondBlocked(c, "Invalid Request")
 				return
 			}
@@ -354,7 +381,7 @@ func (fw *Firewall) checkPathTraversal(input string) (bool, string) {
 	return false, ""
 }
 
-func (fw *Firewall) logThreat(c *gin.Context, threatType, details, payload, matchPattern string) {
+func (fw *Firewall) logThreat(c *gin.Context, threatType, details, payload, matchPattern, status string) {
 	go LogSecurityEvent(SecurityEvent{
 		Type:         threatType,
 		Severity:     "CRITICAL",
@@ -365,6 +392,7 @@ func (fw *Firewall) logThreat(c *gin.Context, threatType, details, payload, matc
 		Details:      details,
 		Payload:      payload,
 		MatchPattern: matchPattern,
+		Status:       status, // Pass validation status
 		Timestamp:    time.Now(),
 	})
 }

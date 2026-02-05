@@ -226,6 +226,6 @@ func runFloodAttack(count int) AttackResult {
 		Message:      fmt.Sprintf("Flood Attack: Sent %d requests in %v", count, duration),
 		BlockedCount: blocked,
 		PassedCount:  passed,
-		Details:      []string{fmt.Sprintf("Rate Limit Logic: Blocked %d, Allowed %d, Errors %d", blocked, passed, errors)},
+		Details:      []string{fmt.Sprintf("Rate Limit Logic: Blocked %d, PASSED %d, Errors %d", blocked, passed, errors)},
 	}
 }

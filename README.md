@@ -58,7 +58,7 @@ Advanced Web Application Firewall with OWASP Top 10 Protection, Rate Limiting, a
 
 ```
 ┌─────────────────┐
-│  Your React App │ (Port 3400)
+│  Your React App │ (Port 3000)
 │   (Protected)   │
 └────────┬────────┘
          │
@@ -79,7 +79,7 @@ Advanced Web Application Firewall with OWASP Top 10 Protection, Rate Limiting, a
 └─────────────────┘
 
 ┌─────────────────┐
-│ React Dashboard │ (Port 3000)
+│ React Dashboard │ (Port 3001)
 │  - Monitoring   │
 │  - Analytics    │
 │  - Config UI    │

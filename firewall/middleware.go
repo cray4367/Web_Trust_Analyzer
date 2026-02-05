@@ -115,15 +115,15 @@ func (fw *Firewall) ThreatDetector() gin.HandlerFunc {
 
 		// CHECK XSS FIRST
 		if enableXSS {
-			if fw.checkXSS(bodyString) {
-				fw.logThreat(c, "XSS_ATTEMPT", "XSS detected in body", bodyString)
+			if match, pattern := fw.checkXSS(bodyString); match {
+				fw.logThreat(c, "XSS_ATTEMPT", "XSS detected in body", bodyString, pattern)
 				fw.respondBlocked(c, "XSS Detected")
 				return
 			}
 			for _, values := range c.Request.URL.Query() {
 				for _, value := range values {
-					if fw.checkXSS(value) {
-						fw.logThreat(c, "XSS_ATTEMPT", "XSS detected in URL", value)
+					if match, pattern := fw.checkXSS(value); match {
+						fw.logThreat(c, "XSS_ATTEMPT", "XSS detected in URL", value, pattern)
 						fw.respondBlocked(c, "XSS Detected")
 						return
 					}
@@ -133,20 +133,46 @@ func (fw *Firewall) ThreatDetector() gin.HandlerFunc {
 
 		// CHECK SQLi SECOND
 		if enableSQLi {
-			if fw.checkSQLInjection(bodyString) {
-				fw.logThreat(c, "SQL_INJECTION", "SQL injection detected in body", bodyString)
+			if match, pattern := fw.checkSQLInjection(bodyString); match {
+				fw.logThreat(c, "SQL_INJECTION", "SQL injection detected in body", bodyString, pattern)
 				fw.respondBlocked(c, "SQL Injection Detected")
 				return
 			}
 			for _, values := range c.Request.URL.Query() {
 				for _, value := range values {
-					if fw.checkSQLInjection(value) {
-						fw.logThreat(c, "SQL_INJECTION", "SQL injection detected in URL", value)
+					if match, pattern := fw.checkSQLInjection(value); match {
+						fw.logThreat(c, "SQL_INJECTION", "SQL injection detected in URL", value, pattern)
 						fw.respondBlocked(c, "SQL Injection Detected")
 						return
 					}
 				}
 			}
+		}
+
+		c.Next()
+	}
+}
+
+// 1.5 Bot Detector
+func (fw *Firewall) BotDetector() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		ua := c.Request.UserAgent()
+
+		// Simple signatures for common bots
+		suspiciousAgents := []string{"sqlmap", "nikto", "nmap", "masscan", "python-requests", "curl", "wget"}
+
+		for _, agent := range suspiciousAgents {
+			if strings.Contains(strings.ToLower(ua), agent) {
+				fw.logThreat(c, "BOT_DETECTED", "Suspicious User-Agent detected", ua, "User-Agent: "+agent)
+				fw.respondBlocked(c, "Bot access blocked")
+				return
+			}
+		}
+
+		if ua == "" {
+			fw.logThreat(c, "BOT_DETECTED", "Empty User-Agent", "", "Empty User-Agent")
+			fw.respondBlocked(c, "Bot access blocked")
+			return
 		}
 
 		c.Next()
@@ -161,6 +187,12 @@ func (fw *Firewall) RateLimiter() gin.HandlerFunc {
 			return
 		}
 
+		// SKIP Rate Limiting for Internal API calls (Dashboard Polling)
+		if strings.HasPrefix(c.Request.URL.Path, "/api") {
+			c.Next()
+			return
+		}
+
 		clientIP := c.ClientIP()
 		fw.mutex.RLock()
 		limitWindow := fw.config.RateLimitWindow
@@ -169,10 +201,18 @@ func (fw *Firewall) RateLimiter() gin.HandlerFunc {
 		isBlacklisted := fw.blacklist[clientIP]
 		fw.mutex.RUnlock()
 
-		if isWhitelisted {
+		// Allow Whitelisted IPs (UNLESS it is a Simulation)
+		// We trust localhost, but we want to allow the Simulator to test limits.
+		// The Simulator sends requests to /app, which is NOT /api.
+		if isWhitelisted && clientIP != "::1" && clientIP != "127.0.0.1" {
 			c.Next()
 			return
 		}
+
+		// For localhost, only allow if it's explicitly whitelisted AND NOT a simulation target?
+		// A simpler approach: Just treat localhost as a normal IP for rate limiting on the proxy path.
+		// This means we REMOVE the auto-whitelist for localhost in database.go?
+		// OR we just ignore whitelist logic here for localhost if we want to test it.
 
 		if isBlacklisted {
 			fw.respondBlocked(c, "IP is Blacklisted")
@@ -230,7 +270,7 @@ func (fw *Firewall) RequestLogger() gin.HandlerFunc {
 		start := time.Now()
 		c.Next()
 		duration := time.Since(start)
-		
+
 		// Only log requests that are NOT internal API calls (to reduce noise)
 		if !strings.HasPrefix(c.Request.URL.Path, "/api") {
 			go LogRequest(RequestLog{
@@ -254,8 +294,8 @@ func (fw *Firewall) InputValidator() gin.HandlerFunc {
 		fw.mutex.RUnlock()
 
 		if enabled {
-			if fw.checkPathTraversal(c.Request.URL.Path) {
-				fw.logThreat(c, "PATH_TRAVERSAL", "Directory traversal attempt", c.Request.URL.Path)
+			if match, pattern := fw.checkPathTraversal(c.Request.URL.Path); match {
+				fw.logThreat(c, "PATH_TRAVERSAL", "Directory traversal attempt", c.Request.URL.Path, pattern)
 				fw.respondBlocked(c, "Invalid Request")
 				return
 			}
@@ -287,44 +327,45 @@ func (fw *Firewall) ProxyMiddleware(targetURL string) gin.HandlerFunc {
 }
 
 // Helpers
-func (fw *Firewall) checkSQLInjection(input string) bool {
+func (fw *Firewall) checkSQLInjection(input string) (bool, string) {
 	for _, pattern := range fw.sqlPatterns {
 		if pattern.MatchString(input) {
-			return true
+			return true, pattern.String()
 		}
 	}
-	return false
+	return false, ""
 }
 
-func (fw *Firewall) checkXSS(input string) bool {
+func (fw *Firewall) checkXSS(input string) (bool, string) {
 	for _, pattern := range fw.xssPatterns {
 		if pattern.MatchString(input) {
-			return true
+			return true, pattern.String()
 		}
 	}
-	return false
+	return false, ""
 }
 
-func (fw *Firewall) checkPathTraversal(input string) bool {
+func (fw *Firewall) checkPathTraversal(input string) (bool, string) {
 	for _, pattern := range fw.pathTraversalPatterns {
 		if pattern.MatchString(input) {
-			return true
+			return true, pattern.String()
 		}
 	}
-	return false
+	return false, ""
 }
 
-func (fw *Firewall) logThreat(c *gin.Context, threatType, details, payload string) {
+func (fw *Firewall) logThreat(c *gin.Context, threatType, details, payload, matchPattern string) {
 	go LogSecurityEvent(SecurityEvent{
-		Type:      threatType,
-		Severity:  "CRITICAL",
-		IP:        c.ClientIP(),
-		Path:      c.Request.URL.Path,
-		Method:    c.Request.Method,
-		UserAgent: c.Request.UserAgent(),
-		Details:   details,
-		Payload:   payload,
-		Timestamp: time.Now(),
+		Type:         threatType,
+		Severity:     "CRITICAL",
+		IP:           c.ClientIP(),
+		Path:         c.Request.URL.Path,
+		Method:       c.Request.Method,
+		UserAgent:    c.Request.UserAgent(),
+		Details:      details,
+		Payload:      payload,
+		MatchPattern: matchPattern,
+		Timestamp:    time.Now(),
 	})
 }
 

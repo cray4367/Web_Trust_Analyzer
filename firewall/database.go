@@ -11,16 +11,17 @@ import (
 var db *sql.DB
 
 type SecurityEvent struct {
-	ID        int64     `json:"id"`
-	Type      string    `json:"type"`
-	Severity  string    `json:"severity"`
-	IP        string    `json:"ip"`
-	Path      string    `json:"path"`
-	Method    string    `json:"method"`
-	UserAgent string    `json:"user_agent"`
-	Details   string    `json:"details"`
-	Payload   string    `json:"payload"`
-	Timestamp time.Time `json:"timestamp"`
+	ID           int64     `json:"id"`
+	Type         string    `json:"type"`
+	Severity     string    `json:"severity"`
+	IP           string    `json:"ip"`
+	Path         string    `json:"path"`
+	Method       string    `json:"method"`
+	UserAgent    string    `json:"user_agent"`
+	Details      string    `json:"details"`
+	Payload      string    `json:"payload"`
+	MatchPattern string    `json:"match_pattern"` // New field
+	Timestamp    time.Time `json:"timestamp"`
 }
 
 type RequestLog struct {
@@ -77,6 +78,7 @@ func InitDB() {
         user_agent TEXT,
         details TEXT,
         payload TEXT,
+        match_pattern TEXT, -- New Column
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -118,9 +120,12 @@ func InitDB() {
 		log.Fatal("Failed to create tables:", err)
 	}
 
-	// --- CRITICAL FIX: Auto-whitelist localhost to prevent dashboard blocking ---
-	_, _ = db.Exec("INSERT OR IGNORE INTO ip_whitelist (ip) VALUES (?)", "::1")
-	_, _ = db.Exec("INSERT OR IGNORE INTO ip_whitelist (ip) VALUES (?)", "127.0.0.1")
+	// Migration for existing tables if they lack match_pattern
+	_, _ = db.Exec("ALTER TABLE security_events ADD COLUMN match_pattern TEXT")
+
+	// --- REMOVED AUTO-WHITELIST so Rate Limit tests work locally ---
+	// _, _ = db.Exec("INSERT OR IGNORE INTO ip_whitelist (ip) VALUES (?)", "::1")
+	// _, _ = db.Exec("INSERT OR IGNORE INTO ip_whitelist (ip) VALUES (?)", "127.0.0.1")
 	// --------------------------------------------------------------------------
 
 	log.Println("✅ Database initialized successfully")
@@ -135,10 +140,10 @@ func CloseDB() {
 // Log security event
 func LogSecurityEvent(event SecurityEvent) error {
 	query := `
-        INSERT INTO security_events (type, severity, ip, path, method, user_agent, details, payload, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO security_events (type, severity, ip, path, method, user_agent, details, payload, match_pattern, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `
-	_, err := db.Exec(query, event.Type, event.Severity, event.IP, event.Path, event.Method, event.UserAgent, event.Details, event.Payload, event.Timestamp)
+	_, err := db.Exec(query, event.Type, event.Severity, event.IP, event.Path, event.Method, event.UserAgent, event.Details, event.Payload, event.MatchPattern, event.Timestamp)
 	if err != nil {
 		log.Printf("Error logging security event: %v", err)
 		return err
@@ -160,7 +165,7 @@ func LogRequest(reqLog RequestLog) error {
 func GetSecurityEventsFromDB(limit, offset int, severity string) ([]SecurityEvent, error) {
 	var events []SecurityEvent
 
-	query := `SELECT id, type, severity, ip, path, method, user_agent, details, payload, timestamp 
+	query := `SELECT id, type, severity, ip, path, method, user_agent, details, payload, match_pattern, timestamp 
               FROM security_events`
 
 	args := []interface{}{}
@@ -180,9 +185,13 @@ func GetSecurityEventsFromDB(limit, offset int, severity string) ([]SecurityEven
 
 	for rows.Next() {
 		var event SecurityEvent
-		err := rows.Scan(&event.ID, &event.Type, &event.Severity, &event.IP, &event.Path, &event.Method, &event.UserAgent, &event.Details, &event.Payload, &event.Timestamp)
+		var matchPattern sql.NullString // Handle possible NULLs from old rows
+		err := rows.Scan(&event.ID, &event.Type, &event.Severity, &event.IP, &event.Path, &event.Method, &event.UserAgent, &event.Details, &event.Payload, &matchPattern, &event.Timestamp)
 		if err != nil {
 			continue
+		}
+		if matchPattern.Valid {
+			event.MatchPattern = matchPattern.String
 		}
 		events = append(events, event)
 	}

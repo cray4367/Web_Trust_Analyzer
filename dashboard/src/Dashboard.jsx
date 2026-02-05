@@ -13,7 +13,8 @@ const Dashboard = () => {
   const [loading, setLoading] = useState(true);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [isSecure, setIsSecure] = useState(true);
-  
+  const [rateLimitConfig, setRateLimitConfig] = useState({ window_seconds: 60, max_requests: 100 });
+
   // New state for Attack Console
   const [attackLogs, setAttackLogs] = useState([]);
   const consoleEndRef = useRef(null);
@@ -24,7 +25,8 @@ const Dashboard = () => {
         fetch(`${API_BASE}/events/stats`),
         fetch(`${API_BASE}/events?limit=20`),
         fetch(`${API_BASE}/monitor/threats`),
-        fetch(`${API_BASE}/config`)
+        fetch(`${API_BASE}/config`),
+        fetch(`${API_BASE}/ratelimit/status`)
       ]);
 
       if (statsRes.ok) setStats(await statsRes.json());
@@ -37,7 +39,17 @@ const Dashboard = () => {
         const config = await configRes.json();
         setIsSecure(config.enable_sqli || config.enable_xss);
       }
-      
+      // Handle the new 4th response (Rate Limit Status)
+      if (arguments[0] && arguments[0][3] && arguments[0][3].ok) {
+        // This block handles the case where Promise.all returns an array
+      }
+      // Re-accessing the promise result is cleaner:
+      const rateLimitRes = await fetch(`${API_BASE}/ratelimit/status`);
+      if (rateLimitRes.ok) {
+        const data = await rateLimitRes.json();
+        if (data.config) setRateLimitConfig(data.config);
+      }
+
       setLoading(false);
     } catch (error) {
       console.error('Error fetching data:', error);
@@ -69,7 +81,7 @@ const Dashboard = () => {
     // Optimistic UI update
     setIsSecure(newState);
     addLog(`System security switched to: ${newState ? 'SECURE' : 'UNSECURE'}`, 'system');
-    
+
     try {
       await fetch(`${API_BASE}/config`, {
         method: 'POST',
@@ -84,52 +96,69 @@ const Dashboard = () => {
           block_suspicious: newState
         })
       });
-      setTimeout(fetchData, 500); 
+      setTimeout(fetchData, 500);
     } catch (err) {
       addLog(`Failed to toggle security: ${err.message}`, 'error');
     }
   };
 
   const launchAttack = async (type) => {
-    let url = ATTACK_TARGET;
-    let payload = "";
-
-    switch(type) {
-      case 'SQL_INJECTION':
-        payload = "?id=1' OR '1'='1";
-        url += payload;
-        break;
-      case 'XSS':
-        payload = "?search=<script>alert('XSS')</script>";
-        url += payload;
-        break;
-      case 'PATH_TRAVERSAL':
-        payload = "?file=../../etc/passwd";
-        url += payload;
-        break;
-      default:
-        payload = "/normal";
-        url += payload;
-    }
-
-    addLog(`🚀 Launching ${type} attack...`, 'info');
-    addLog(`📡 Sending payload: ${payload}`, 'code');
+    addLog(`🚀 Launching ${type} simulation...`, 'info');
 
     try {
-      const res = await fetch(url);
-      
-      if (res.status === 403 || res.status === 400) {
-        addLog(`🛡️ BLOCKED! Server responded with ${res.status} Forbidden`, 'success');
-      } else if (res.status === 200) {
-        addLog(`⚠️ PASSED! Server responded with 200 OK (Vulnerability Exposed)`, 'danger');
+      const res = await fetch(`${API_BASE}/attack/simulate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: type,
+          intensity: type === 'FLOOD' ? 200 : 1
+        })
+      });
+
+      const result = await res.json();
+
+      if (result.success) {
+        // Log the summary
+        addLog(result.message, 'success');
+
+        // Log details line by line
+        result.details.forEach(detail => {
+          if (detail.includes("BLOCKED")) addLog(detail, 'success');
+          else if (detail.includes("PASSED")) addLog(detail, 'danger');
+          else addLog(detail, 'info');
+        });
+
       } else {
-        addLog(`ℹ️ Server responded with ${res.status}`, 'info');
+        addLog(`❌ Simulation Failed: ${result.error}`, 'error');
       }
-      
-      // Refresh logs immediately to show the block in the table
-      setTimeout(fetchData, 500);
+
+      // Refresh logs
+      setTimeout(fetchData, 1000);
     } catch (err) {
       addLog(`❌ Request Failed: ${err.message}`, 'error');
+    }
+  };
+
+  const updateRateLimit = async (e) => {
+    e.preventDefault();
+    const windowSeconds = parseInt(e.target.window_seconds.value);
+    const maxRequests = parseInt(e.target.max_requests.value);
+
+    try {
+      const res = await fetch(`${API_BASE}/ratelimit/config`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ window_seconds: windowSeconds, max_requests: maxRequests })
+      });
+
+      if (res.ok) {
+        addLog(`✅ Rate limit updated: ${maxRequests} reqs / ${windowSeconds}s`, 'success');
+        fetchData();
+      } else {
+        addLog('❌ Failed to update rate limit', 'error');
+      }
+    } catch (err) {
+      addLog(`❌ Error: ${err.message}`, 'error');
     }
   };
 
@@ -157,7 +186,7 @@ const Dashboard = () => {
       <div className="table-header">
         <h3><AlertTriangle size={20} /> Live Security Logs</h3>
         <div className="table-actions">
-           <button className="icon-btn" onClick={fetchData}><RefreshCw size={18} /></button>
+          <button className="icon-btn" onClick={fetchData}><RefreshCw size={18} /></button>
         </div>
       </div>
       <div className="threat-table">
@@ -169,6 +198,7 @@ const Dashboard = () => {
               <th>Severity</th>
               <th>IP Address</th>
               <th>Payload / Path</th>
+              <th>Match Rule</th>
               <th>Status</th>
             </tr>
           </thead>
@@ -178,7 +208,7 @@ const Dashboard = () => {
                 <td className="time-cell">{new Date(event.timestamp).toLocaleTimeString()}</td>
                 <td><span className="type-badge">{event.type?.replace(/_/g, ' ')}</span></td>
                 <td>
-                  <span className="severity-badge" style={{ 
+                  <span className="severity-badge" style={{
                     background: `${getSeverityColor(event.severity)}20`,
                     color: getSeverityColor(event.severity),
                     border: `1px solid ${getSeverityColor(event.severity)}40`
@@ -188,7 +218,12 @@ const Dashboard = () => {
                 </td>
                 <td className="ip-cell">{event.ip}</td>
                 <td className="path-cell" title={event.payload || event.path}>
-                    {event.payload ? event.payload.substring(0, 40) : event.path}
+                  {event.payload ? event.payload.substring(0, 40) : event.path}
+                </td>
+                <td className="rule-cell">
+                  {event.match_pattern ? (
+                    <span className="code-badge">{event.match_pattern.substring(0, 30)}</span>
+                  ) : <span className="text-muted">-</span>}
                 </td>
                 <td><span className="block-status">BLOCKED</span></td>
               </tr>
@@ -201,19 +236,19 @@ const Dashboard = () => {
 
   const AttackConsole = () => (
     <div className="console-container">
-        <div className="console-header">
-            <Terminal size={16} /> <span>ATTACK CONSOLE</span>
-        </div>
-        <div className="console-body">
-            {attackLogs.length === 0 && <div className="console-placeholder">Ready to launch attacks...</div>}
-            {attackLogs.map((log, i) => (
-                <div key={i} className={`console-line ${log.type}`}>
-                    <span className="console-time">[{log.time}]</span>
-                    <span className="console-msg">{log.msg}</span>
-                </div>
-            ))}
-            <div ref={consoleEndRef} />
-        </div>
+      <div className="console-header">
+        <Terminal size={16} /> <span>ATTACK CONSOLE</span>
+      </div>
+      <div className="console-body">
+        {attackLogs.length === 0 && <div className="console-placeholder">Ready to launch attacks...</div>}
+        {attackLogs.map((log, i) => (
+          <div key={i} className={`console-line ${log.type}`}>
+            <span className="console-time">[{log.time}]</span>
+            <span className="console-msg">{log.msg}</span>
+          </div>
+        ))}
+        <div ref={consoleEndRef} />
+      </div>
     </div>
   );
 
@@ -222,36 +257,67 @@ const Dashboard = () => {
       { id: 1, name: "SQL Injection", type: "SQL_INJECTION", desc: "Injects malicious SQL query" },
       { id: 2, name: "Cross-Site Scripting", type: "XSS", desc: "Injects malicious scripts" },
       { id: 3, name: "Path Traversal", type: "PATH_TRAVERSAL", desc: "Access unauthorized files" },
+      { id: 4, name: "Botnet Attack", type: "BOT", desc: "Simulates suspicious User-Agents" },
+      { id: 5, name: "DDoS Simulation", type: "FLOOD", desc: "High concurrency request flood" },
     ];
 
     return (
       <div className="attack-layout">
-          <div className="owasp-container">
-            <div className="owasp-header">
-              <h3><Zap size={20} /> Attack Simulation Lab</h3>
-              <p style={{color: '#94a3b8', fontSize: '0.9rem'}}>Launch live attacks against your own system.</p>
-            </div>
-            <div className="owasp-grid">
-              {attacks.map((attack) => (
-                <div key={attack.id} className="owasp-card">
-                  <div className="owasp-top">
-                    <div className="owasp-number">0{attack.id}</div>
-                    <div className="owasp-status active"><div className="status-dot"></div> Ready</div>
-                  </div>
-                  <div className="owasp-name">{attack.name}</div>
-                  <div className="owasp-desc">{attack.desc}</div>
-                  <button className="attack-btn" onClick={() => launchAttack(attack.type)}>
-                    <Play size={14} fill="currentColor" /> LAUNCH ATTACK
-                  </button>
-                </div>
-              ))}
-            </div>
+        <div className="owasp-container">
+          <div className="owasp-header">
+            <h3><Zap size={20} /> Attack Simulation Lab</h3>
+            <p style={{ color: '#94a3b8', fontSize: '0.9rem' }}>Launch live attacks against your own system.</p>
           </div>
-          
-          <AttackConsole />
+          <div className="owasp-grid">
+            {attacks.map((attack) => (
+              <div key={attack.id} className="owasp-card">
+                <div className="owasp-top">
+                  <div className="owasp-number">0{attack.id}</div>
+                  <div className="owasp-status active"><div className="status-dot"></div> Ready</div>
+                </div>
+                <div className="owasp-name">{attack.name}</div>
+                <div className="owasp-desc">{attack.desc}</div>
+                <button className="attack-btn" onClick={() => launchAttack(attack.type)}>
+                  <Play size={14} fill="currentColor" /> LAUNCH ATTACK
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <AttackConsole />
       </div>
     );
   };
+
+
+  const SettingsPanel = () => (
+    <div className="settings-panel">
+      <div className="settings-header">
+        <h3><Settings size={20} /> Firewall Configuration</h3>
+        <p>Adjust the security sensitivity and thresholds.</p>
+      </div>
+
+      <div className="settings-card">
+        <h4>Rate Limiting Strategy</h4>
+        <p className="settings-desc">Define the threshold for the DDoS protection system.</p>
+
+        <form onSubmit={updateRateLimit} className="settings-form">
+          <div className="form-group">
+            <label>Window Duration (Seconds)</label>
+            <input type="number" name="window_seconds" defaultValue={rateLimitConfig.window_seconds} min="1" required />
+            <span className="form-hint">Time window to track requests</span>
+          </div>
+          <div className="form-group">
+            <label>Max Requests per Window</label>
+            <input type="number" name="max_requests" defaultValue={rateLimitConfig.max_requests} min="1" required />
+            <span className="form-hint">Requests allowed before blocking IP</span>
+          </div>
+          <button type="submit" className="save-btn">SAVE PARAMETERS</button>
+        </form>
+      </div>
+    </div>
+  );
 
   const ThreatAnalysis = () => {
     if (!threats) return null;
@@ -284,7 +350,7 @@ const Dashboard = () => {
     <div className="dashboard">
       <div className="bg-grid"></div>
       <div className="bg-gradient"></div>
-      
+
       <header className="header">
         <div className="header-left">
           <Shield className="logo-icon" size={32} />
@@ -302,7 +368,7 @@ const Dashboard = () => {
       </header>
 
       <nav className="nav-tabs">
-        {['overview', 'logs', 'attack lab'].map(tab => (
+        {['overview', 'logs', 'attack lab', 'settings'].map(tab => (
           <button key={tab} className={`nav-tab ${activeTab === tab ? 'active' : ''}`} onClick={() => setActiveTab(tab)}>
             {tab.toUpperCase()}
           </button>
@@ -320,14 +386,14 @@ const Dashboard = () => {
             </div>
             <div className="charts-grid">
               <div className="chart-card">
-                 <h3><Cpu size={20} /> System Status</h3>
-                 <div className="system-status-indicator">
-                    <div className={`status-big-icon ${isSecure ? 'safe' : 'danger'}`}>
-                        {isSecure ? <ShieldCheck size={64} /> : <ShieldOff size={64} />}
-                    </div>
-                    <h2>{isSecure ? "Firewall Active" : "Firewall Disabled"}</h2>
-                    <p>{isSecure ? "All systems operational. Threats are being blocked." : "WARNING: Protection is disabled. Application is vulnerable."}</p>
-                 </div>
+                <h3><Cpu size={20} /> System Status</h3>
+                <div className="system-status-indicator">
+                  <div className={`status-big-icon ${isSecure ? 'safe' : 'danger'}`}>
+                    {isSecure ? <ShieldCheck size={64} /> : <ShieldOff size={64} />}
+                  </div>
+                  <h2>{isSecure ? "Firewall Active" : "Firewall Disabled"}</h2>
+                  <p>{isSecure ? "All systems operational. Threats are being blocked." : "WARNING: Protection is disabled. Application is vulnerable."}</p>
+                </div>
               </div>
               <ThreatAnalysis />
             </div>
@@ -337,6 +403,7 @@ const Dashboard = () => {
 
         {activeTab === 'logs' && <ThreatTable />}
         {activeTab === 'attack lab' && <OWASPChecks />}
+        {activeTab === 'settings' && <SettingsPanel />}
       </main>
 
       <style jsx>{`
@@ -355,6 +422,23 @@ const Dashboard = () => {
         .console-line.error .console-msg { color: #fca5a5; }
         .console-line.system .console-msg { color: #fbbf24; }
         .console-placeholder { color: #475569; font-style: italic; text-align: center; margin-top: 2rem; }
+
+        /* SETTINGS STYLES */
+        .settings-panel { padding: 2rem; background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(10px); border: 1px solid rgba(0, 245, 255, 0.2); border-radius: 16px; max-width: 800px; margin: 0 auto; }
+        .settings-header { margin-bottom: 2rem; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 1rem; }
+        .settings-header h3 { display: flex; align-items: center; gap: 0.75rem; color: #00f5ff; margin-bottom: 0.5rem; }
+        .settings-header p { color: #94a3b8; font-size: 0.9rem; }
+        .settings-card { background: rgba(0,0,0,0.2); padding: 1.5rem; border-radius: 12px; border: 1px solid rgba(255,255,255,0.05); }
+        .settings-card h4 { color: #e0e7ff; margin-bottom: 0.5rem; }
+        .settings-desc { color: #64748b; font-size: 0.85rem; margin-bottom: 1.5rem; }
+        .settings-form { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; align-items: end; }
+        .form-group { display: flex; flex-direction: column; gap: 0.5rem; }
+        .form-group label { font-size: 0.8rem; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; }
+        .form-group input { background: rgba(15, 23, 42, 0.8); border: 1px solid rgba(0, 245, 255, 0.2); padding: 0.75rem; border-radius: 6px; color: #fff; font-family: inherit; transition: all 0.3s ease; }
+        .form-group input:focus { outline: none; border-color: #00f5ff; box-shadow: 0 0 10px rgba(0, 245, 255, 0.2); }
+        .form-hint { font-size: 0.75rem; color: #64748b; }
+        .save-btn { grid-column: 1 / -1; padding: 0.75rem; background: #00f5ff; color: #000; border: none; border-radius: 6px; font-weight: 700; cursor: pointer; transition: all 0.3s ease; margin-top: 1rem; }
+        .save-btn:hover { background: #fff; box-shadow: 0 0 20px rgba(0, 245, 255, 0.5); }
 
         /* Existing Styles */
         .secure-toggle { display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem 1.5rem; border-radius: 8px; font-weight: 700; cursor: pointer; transition: all 0.3s ease; border: none; }
@@ -429,6 +513,9 @@ const Dashboard = () => {
         .type-badge { display: inline-block; padding: 0.25rem 0.75rem; background: rgba(0, 128, 255, 0.2); color: #0080ff; border-radius: 6px; font-size: 0.75rem; font-weight: 500; text-transform: capitalize; }
         .severity-badge { display: inline-block; padding: 0.25rem 0.75rem; border-radius: 6px; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; }
         .ip-cell { font-family: 'Courier New', monospace; color: #00f5ff; }
+        .rule-cell { font-family: 'Courier New', monospace; color: #f59e0b; font-size: 0.75rem; }
+        .code-badge { background: rgba(0,0,0,0.3); padding: 2px 6px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); }
+        .text-muted { color: #64748b; }
         .path-cell { color: #94a3b8; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .owasp-container { background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(10px); border: 1px solid rgba(0, 245, 255, 0.2); border-radius: 16px; padding: 2rem; }
         .owasp-header h3 { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem; }

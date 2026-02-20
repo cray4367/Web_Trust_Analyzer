@@ -122,6 +122,9 @@ func (fw *Firewall) ThreatDetector() gin.HandlerFunc {
 			}
 			fw.logThreat(c, "XSS_ATTEMPT", "XSS detected in body", bodyString, pattern, status)
 
+			// Update trust profile
+			UpdateTrustAfterThreatDetection(c, "XSS_ATTEMPT")
+
 			if enableXSS {
 				fw.respondBlocked(c, "XSS Detected")
 				return
@@ -153,6 +156,9 @@ func (fw *Firewall) ThreatDetector() gin.HandlerFunc {
 			}
 			fw.logThreat(c, "SQL_INJECTION", "SQL injection detected in body", bodyString, pattern, status)
 
+			// Update trust profile
+			UpdateTrustAfterThreatDetection(c, "SQL_INJECTION")
+
 			if enableSQLi {
 				fw.respondBlocked(c, "SQL Injection Detected")
 				return
@@ -175,6 +181,9 @@ func (fw *Firewall) ThreatDetector() gin.HandlerFunc {
 				}
 			}
 		}
+
+		// If we reach here, request is clean - update trust positively
+		UpdateTrustAfterCleanRequest(c)
 
 		c.Next()
 	}
@@ -347,7 +356,6 @@ func (fw *Firewall) ProxyMiddleware(targetURL string) gin.HandlerFunc {
 
 	return func(c *gin.Context) {
 		if !c.IsAborted() {
-			c.Request.URL.Path = strings.TrimPrefix(c.Request.URL.Path, "/app")
 			proxy.ServeHTTP(c.Writer, c.Request)
 		}
 	}

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"os"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -37,9 +38,12 @@ func main() {
 		fw.AddToWhitelist(ip)
 	}
 
+	// Trust scoring middleware (first to track all requests)
+	router.Use(fw.TrustScorer())
 	router.Use(fw.SecurityHeaders())
+	router.Use(fw.TrustBasedAccessControl()) // Apply trust-based policies
 	router.Use(fw.RateLimiter())
-	router.Use(fw.BotDetector()) // New Bot Detector
+	router.Use(fw.BotDetector())
 	router.Use(fw.InputValidator())
 	router.Use(fw.ThreatDetector())
 	router.Use(fw.RequestLogger())
@@ -65,11 +69,24 @@ func main() {
 		api.GET("/ip/blacklist", GetBlacklist)
 		api.GET("/owasp/status", GetOWASPStatus)
 		api.GET("/owasp/violations", GetOWASPViolations)
+
+		// Trust API endpoints
+		api.GET("/trust/profile/:ip", GetTrustProfileHandler)
+		api.GET("/trust/profiles", GetAllTrustProfilesHandler)
+		api.GET("/trust/top-trusted", GetTopTrustedHandler)
+		api.GET("/trust/suspicious", GetSuspiciousIPsHandler)
+		api.GET("/trust/distribution", GetTrustDistributionHandler)
+		api.GET("/trust/history/:ip", GetTrustHistoryHandler)
+		api.GET("/trust/stats", GetTrustStatsHandler)
 	}
 
-	// 3. POINT PROXY TO TARGET (Port 3001)
-	// This connects the firewall to your "react-resume-template"
-	router.Any("/app/*path", fw.ProxyMiddleware("http://localhost:3000"))
+	// 3. POINT PROXY TO TARGET
+	targetURL := os.Getenv("TARGET_URL")
+	if targetURL == "" {
+		targetURL = "http://localhost:3000"
+	}
+	// Handle all other traffic (Proxy to target)
+	router.NoRoute(fw.ProxyMiddleware(targetURL))
 
 	// 4. SET FIREWALL PORT TO 8080
 	// This ensures it doesn't clash with Vite (5173) or React (3001)

@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Shield, Activity, AlertTriangle, Lock, Cpu, Eye, Settings, Database, TrendingUp, Users, Filter, RefreshCw, Download, Search, Play, Zap, ShieldOff, ShieldCheck, Terminal } from 'lucide-react';
+import { TrustScoreGauge, TrustDistributionChart, TrustProfileCard, TrustStatsCards } from './TrustComponents';
 
-const API_BASE = 'http://localhost:8080/api';
-const ATTACK_TARGET = 'http://localhost:8080/app';
+const API_BASE = import.meta.env.VITE_API_URL || '/api';
+const ATTACK_TARGET = import.meta.env.VITE_TARGET_URL || '/app';
 
 
 const Dashboard = () => {
@@ -19,14 +20,22 @@ const Dashboard = () => {
   const [attackLogs, setAttackLogs] = useState([]);
   const consoleEndRef = useRef(null);
 
+  // New state for Trust System
+  const [trustStats, setTrustStats] = useState(null);
+  const [trustProfiles, setTrustProfiles] = useState([]);
+  const [trustDistribution, setTrustDistribution] = useState({});
+  const [profileFilter, setProfileFilter] = useState('all');
+
   const fetchData = async () => {
     try {
-      const [statsRes, eventsRes, threatsRes, configRes] = await Promise.all([
+      const [statsRes, eventsRes, threatsRes, configRes, trustStatsRes, trustDistRes] = await Promise.all([
         fetch(`${API_BASE}/events/stats`),
         fetch(`${API_BASE}/events?limit=20`),
         fetch(`${API_BASE}/monitor/threats`),
         fetch(`${API_BASE}/config`),
-        fetch(`${API_BASE}/ratelimit/status`)
+        fetch(`${API_BASE}/ratelimit/status`),
+        fetch(`${API_BASE}/trust/stats`),
+        fetch(`${API_BASE}/trust/distribution`)
       ]);
 
       if (statsRes.ok) setStats(await statsRes.json());
@@ -39,22 +48,40 @@ const Dashboard = () => {
         const config = await configRes.json();
         setIsSecure(config.enable_sqli || config.enable_xss);
       }
-      // Handle the new 4th response (Rate Limit Status)
-      if (arguments[0] && arguments[0][3] && arguments[0][3].ok) {
-        // This block handles the case where Promise.all returns an array
-      }
-      // Re-accessing the promise result is cleaner:
+
       const rateLimitRes = await fetch(`${API_BASE}/ratelimit/status`);
       if (rateLimitRes.ok) {
         const data = await rateLimitRes.json();
         if (data.config) setRateLimitConfig(data.config);
       }
 
+      // Fetch trust data
+      if (trustStatsRes.ok) setTrustStats(await trustStatsRes.json());
+      if (trustDistRes.ok) {
+        const distData = await trustDistRes.json();
+        setTrustDistribution(distData.distribution || {});
+      }
+
       setLoading(false);
     } catch (error) {
       console.error('Error fetching data:', error);
-      // Don't stop loading on error, just log it, helps prevent UI freezing
       setLoading(false);
+    }
+  };
+
+  const fetchTrustProfiles = async () => {
+    try {
+      let endpoint = '/trust/profiles?limit=20';
+      if (profileFilter === 'trusted') endpoint = '/trust/top-trusted?limit=20';
+      if (profileFilter === 'suspicious') endpoint = '/trust/suspicious?limit=20';
+
+      const res = await fetch(`${API_BASE}${endpoint}`);
+      if (res.ok) {
+        const data = await res.json();
+        setTrustProfiles(data.profiles || []);
+      }
+    } catch (error) {
+      console.error('Error fetching trust profiles:', error);
     }
   };
 
@@ -65,6 +92,12 @@ const Dashboard = () => {
       return () => clearInterval(interval);
     }
   }, [autoRefresh]);
+
+  useEffect(() => {
+    if (activeTab === 'trust') {
+      fetchTrustProfiles();
+    }
+  }, [activeTab, profileFilter]);
 
   // Scroll console to bottom
   useEffect(() => {
@@ -374,7 +407,7 @@ const Dashboard = () => {
       </header>
 
       <nav className="nav-tabs">
-        {['overview', 'logs', 'attack lab', 'settings'].map(tab => (
+        {['overview', 'logs', 'trust', 'attack lab', 'settings'].map(tab => (
           <button key={tab} className={`nav-tab ${activeTab === tab ? 'active' : ''}`} onClick={() => setActiveTab(tab)}>
             {tab.toUpperCase()}
           </button>
@@ -408,6 +441,57 @@ const Dashboard = () => {
         )}
 
         {activeTab === 'logs' && <ThreatTable />}
+
+        {activeTab === 'trust' && (
+          <>
+            <TrustStatsCards trustStats={trustStats} />
+
+            <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '1.5rem', marginTop: '2rem' }}>
+              <div className="trust-profiles-container">
+                <div className="trust-header">
+                  <h3><Users size={20} /> User Trust Profiles</h3>
+                  <div className="trust-filters">
+                    <button
+                      className={profileFilter === 'all' ? 'filter-active' : ''}
+                      onClick={() => setProfileFilter('all')}
+                    >
+                      All
+                    </button>
+                    <button
+                      className={profileFilter === 'trusted' ? 'filter-active' : ''}
+                      onClick={() => setProfileFilter('trusted')}
+                    >
+                      Trusted
+                    </button>
+                    <button
+                      className={profileFilter === 'suspicious' ? 'filter-active' : ''}
+                      onClick={() => setProfileFilter('suspicious')}
+                    >
+                      Suspicious
+                    </button>
+                  </div>
+                </div>
+
+                <div className="trust-profiles-grid">
+                  {trustProfiles.length === 0 ? (
+                    <div style={{ textAlign: 'center', padding: '3rem', color: '#64748b' }}>
+                      No trust profiles found. Profiles will appear as requests are processed.
+                    </div>
+                  ) : (
+                    trustProfiles.map(profile => (
+                      <TrustProfileCard key={profile.ip} profile={profile} />
+                    ))
+                  )}
+                </div>
+              </div>
+
+              <div>
+                <TrustDistributionChart distribution={trustDistribution} />
+              </div>
+            </div>
+          </>
+        )}
+
         {activeTab === 'attack lab' && <OWASPChecks />}
         {activeTab === 'settings' && <SettingsPanel />}
       </main>
@@ -537,6 +621,44 @@ const Dashboard = () => {
         @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
         .loading-container { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; gap: 2rem; }
         .loader { width: 64px; height: 64px; border: 4px solid rgba(0, 245, 255, 0.2); border-top-color: #00f5ff; border-radius: 50%; animation: spin 1s linear infinite; }
+        
+        /* TRUST COMPONENT STYLES */
+        .trust-stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1.5rem; margin-bottom: 2rem; }
+        .trust-stat-card { padding: 1.5rem; background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(10px); border: 1px solid rgba(0, 245, 255, 0.2); border-radius: 12px; display: flex; flex-direction: column; align-items: center; gap: 0.75rem; transition: all 0.3s ease; }
+        .trust-stat-card:hover { transform: translateY(-4px); border-color: var(--accent-color); box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4); }
+        .trust-stat-card .stat-value { font-size: 2rem; font-weight: 700; background: linear-gradient(135deg, var(--accent-color), #fff); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        .trust-stat-card .stat-label { font-size: 0.875rem; color: #94a3b8; text-align: center; }
+        
+        .trust-profiles-container { background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(10px); border: 1px solid rgba(0, 245, 255, 0.2); border-radius: 16px; padding: 2rem; }
+        .trust-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; }
+        .trust-header h3 { display: flex; align-items: center; gap: 0.75rem; color: #e0e7ff; margin: 0; }
+        .trust-filters { display: flex; gap: 0.5rem; }
+        .trust-filters button { padding: 0.5rem 1rem; background: rgba(0, 0, 0, 0.3); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 6px; color: #94a3b8; cursor: pointer; transition: all 0.3s ease; font-family: inherit; font-size: 0.875rem; }
+        .trust-filters button:hover { background: rgba(0, 245, 255, 0.1); border-color: rgba(0, 245, 255, 0.3); color: #00f5ff; }
+        .trust-filters button.filter-active { background: rgba(0, 245, 255, 0.2); border-color: #00f5ff; color: #00f5ff; }
+        
+        .trust-profiles-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1.5rem; }
+        .trust-profile-card { padding: 1.5rem; background: rgba(0, 0, 0, 0.3); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 12px; transition: all 0.3s ease; }
+        .trust-profile-card:hover { transform: translateY(-2px); border-color: #00f5ff; box-shadow: 0 4px 16px rgba(0, 245, 255, 0.2); }
+        .profile-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
+        .profile-ip { font-family: 'Courier New', monospace; color: #00f5ff; font-weight: 600; }
+        .trust-badge { padding: 0.25rem 0.75rem; border-radius: 6px; font-size: 0.7rem; font-weight: 600; text-transform: uppercase; }
+        .profile-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-top: 1rem; padding-top: 1rem; border-top: 1px solid rgba(255, 255, 255, 0.1); }
+        .profile-stats .stat { display: flex; flex-direction: column; align-items: center; gap: 0.25rem; }
+        .profile-stats .stat-label { font-size: 0.75rem; color: #64748b; }
+        .profile-stats .stat-value { font-size: 1.25rem; font-weight: 700; color: #e0e7ff; }
+        .profile-timeline { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid rgba(255, 255, 255, 0.1); }
+        
+        .trust-distribution { padding: 2rem; background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(10px); border: 1px solid rgba(0, 245, 255, 0.2); border-radius: 16px; }
+        .distribution-bars { display: flex; flex-direction: column; gap: 1.25rem; }
+        .distribution-item { display: flex; flex-direction: column; gap: 0.5rem; }
+        .distribution-label { display: flex; justify-content: space-between; font-size: 0.875rem; color: #94a3b8; }
+        .distribution-count { color: #00f5ff; font-weight: 600; }
+        .distribution-bar-track { height: 8px; background: rgba(0, 0, 0, 0.5); border-radius: 4px; overflow: hidden; }
+        .distribution-bar-fill { height: 100%; border-radius: 4px; box-shadow: 0 0 10px rgba(0, 245, 255, 0.5); }
+        .distribution-percentage { font-size: 0.75rem; color: #64748b; text-align: right; }
+        
+        .trust-gauge { width: 100%; max-width: 200px; margin: 0 auto; }
       `}</style>
     </div>
   );

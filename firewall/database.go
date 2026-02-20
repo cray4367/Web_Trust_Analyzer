@@ -116,6 +116,34 @@ func InitDB() {
     );
 
     CREATE INDEX IF NOT EXISTS idx_security_events_timestamp ON security_events(timestamp);
+
+    CREATE TABLE IF NOT EXISTS user_trust_profiles (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ip TEXT UNIQUE NOT NULL,
+        trust_score REAL DEFAULT 50.0,
+        reputation TEXT DEFAULT 'NEW',
+        request_count INTEGER DEFAULT 0,
+        threat_count INTEGER DEFAULT 0,
+        clean_count INTEGER DEFAULT 0,
+        first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+        last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+        last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS trust_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ip TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        old_score REAL,
+        new_score REAL,
+        reason TEXT,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (ip) REFERENCES user_trust_profiles(ip)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_trust_profiles_ip ON user_trust_profiles(ip);
+    CREATE INDEX IF NOT EXISTS idx_trust_profiles_score ON user_trust_profiles(trust_score);
+    CREATE INDEX IF NOT EXISTS idx_trust_history_ip ON trust_history(ip);
     `
 
 	if _, err := db.Exec(createTables); err != nil {
@@ -126,6 +154,15 @@ func InitDB() {
 	_, _ = db.Exec("ALTER TABLE security_events ADD COLUMN match_pattern TEXT")
 	// Migration for status
 	_, _ = db.Exec("ALTER TABLE security_events ADD COLUMN status TEXT DEFAULT 'BLOCKED'")
+
+	// Migrations for Trust System (ensure columns exist if table was old)
+	_, _ = db.Exec("ALTER TABLE user_trust_profiles ADD COLUMN trust_score REAL DEFAULT 50.0")
+	_, _ = db.Exec("ALTER TABLE user_trust_profiles ADD COLUMN reputation TEXT DEFAULT 'NEW'")
+	_, _ = db.Exec("ALTER TABLE user_trust_profiles ADD COLUMN request_count INTEGER DEFAULT 0")
+	_, _ = db.Exec("ALTER TABLE user_trust_profiles ADD COLUMN threat_count INTEGER DEFAULT 0")
+	_, _ = db.Exec("ALTER TABLE user_trust_profiles ADD COLUMN clean_count INTEGER DEFAULT 0")
+	_, _ = db.Exec("ALTER TABLE user_trust_profiles ADD COLUMN last_seen DATETIME DEFAULT CURRENT_TIMESTAMP")
+	_, _ = db.Exec("ALTER TABLE user_trust_profiles ADD COLUMN last_updated DATETIME DEFAULT CURRENT_TIMESTAMP")
 
 	// --- REMOVED AUTO-WHITELIST so Rate Limit tests work locally ---
 	// _, _ = db.Exec("INSERT OR IGNORE INTO ip_whitelist (ip) VALUES (?)", "::1")
@@ -177,7 +214,7 @@ func GetSecurityEventsFromDB(limit, offset int, severity string) ([]SecurityEven
 		args = append(args, severity)
 	}
 
-	query += " ORDER BY timestamp DESC LIMIT ? OFFSET ?"
+	query += " ORDER BY id DESC LIMIT ? OFFSET ?"
 	args = append(args, limit, offset)
 
 	rows, err := db.Query(query, args...)
@@ -254,7 +291,7 @@ func GetEventStatsFromDB() (EventStats, error) {
 func GetRequestLogsFromDB(limit, offset int) ([]RequestLog, error) {
 	var logs []RequestLog
 	query := `SELECT id, ip, method, path, status_code, duration, user_agent, timestamp 
-              FROM request_logs ORDER BY timestamp DESC LIMIT ? OFFSET ?`
+              FROM request_logs ORDER BY id DESC LIMIT ? OFFSET ?`
 
 	rows, err := db.Query(query, limit, offset)
 	if err != nil {

@@ -2,11 +2,15 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +26,7 @@ type FirewallConfig struct {
 	EnableSQLi          bool `json:"enable_sqli"`
 	EnablePathTraversal bool `json:"enable_path_traversal"`
 	BlockSuspicious     bool `json:"block_suspicious"`
+	EnableBotDetection  bool `json:"enable_bot_detection"`
 }
 
 type Firewall struct {
@@ -50,14 +55,27 @@ func NewFirewall(config FirewallConfig) *Firewall {
 	}
 
 	// SQL Injection Patterns
+	//
+	// Design notes:
+	//   - Bare \' and # removed: too many false positives on natural language
+	//     (e.g. O'Brien, URL fragments).  We require a quote to be followed by
+	//     an SQL keyword or operator before flagging.
+	//   - %27 (URL-encoded quote) kept: rarely appears legitimately in query
+	//     strings and is a classic WAF evasion indicator.
 	fw.sqlPatterns = []*regexp.Regexp{
-		regexp.MustCompile(`(?i)(%27)|(\')|(\-\-)|(\%23)|(#)`),
-		regexp.MustCompile(`(?i)((\%3D)|(=))[^\n]*((\%27)|(\')|(\-\-)|(\%3B)|(:))`),
+		// URL-encoded single quote — strong evasion signal on its own
+		regexp.MustCompile(`(?i)%27`),
+		// SQL comment sequences
+		regexp.MustCompile(`(?i)(\-\-)|(\%23)(?:[^\n]|$)`),
+		// Quote immediately followed by SQL keyword / boolean tautology
+		regexp.MustCompile(`(?i)\'\s*(OR|AND|UNION|SELECT|INSERT|UPDATE|DELETE|DROP|--)`),
+		// Classic = … ' or = … -- pattern
+		regexp.MustCompile(`(?i)((\%3D)|(=))[^\n]*((\%27)|(\')|(\-\-)|(\%3B))`),
 		regexp.MustCompile(`(?i)UNION\s+SELECT`),
 		regexp.MustCompile(`(?i)WAITFOR\s+DELAY`),
-		regexp.MustCompile(`(?i)OR\s+1=1`),
+		regexp.MustCompile(`(?i)OR\s+1\s*=\s*1`),
 		regexp.MustCompile(`(?i)DROP\s+TABLE`),
-		regexp.MustCompile(`(?i);.*(DELETE|INSERT|UPDATE)`),
+		regexp.MustCompile(`(?i);\s*(DELETE|INSERT|UPDATE)`),
 	}
 
 	// XSS Patterns
@@ -71,10 +89,24 @@ func NewFirewall(config FirewallConfig) *Firewall {
 	}
 
 	// Path Traversal
+	//
+	// Covers standard, percent-encoded, double-encoded, overlong UTF-8,
+	// and Unicode escape variants.
 	fw.pathTraversalPatterns = []*regexp.Regexp{
+		// Standard ../ and ..\
 		regexp.MustCompile(`\.\./`),
 		regexp.MustCompile(`\.\.\\`),
-		regexp.MustCompile(`%2e%2e%2f`),
+		// Single percent-encoded (case-insensitive)
+		regexp.MustCompile(`(?i)%2e%2e[%/\\]`),
+		// Double percent-encoded: %252e%252e (%25 = %, so %252e = %2e decoded)
+		regexp.MustCompile(`(?i)%252e%252e`),
+		// Overlong UTF-8 encoding of '.' (0xC0 0xAE) and '/' (0xC0 0xAF)
+		regexp.MustCompile(`(?i)%c0%ae`),
+		regexp.MustCompile(`(?i)%c0%af`),
+		// Unicode escape sequences \u002e = '.', \u002f = '/'
+		regexp.MustCompile(`(?i)\\u002e\\u002e`),
+		// Null-byte injection often paired with traversal
+		regexp.MustCompile(`%00`),
 	}
 
 	return fw
@@ -190,11 +222,25 @@ func (fw *Firewall) ThreatDetector() gin.HandlerFunc {
 }
 
 // 1.5 Bot Detector
+// Controlled by FirewallConfig.EnableBotDetection.
+// When disabled the middleware is a no-op, allowing curl health checks and
+// legitimate automation to pass through without being blocked.
 func (fw *Firewall) BotDetector() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		fw.mutex.RLock()
+		enabled := fw.config.EnableBotDetection
+		fw.mutex.RUnlock()
+
+		if !enabled {
+			c.Next()
+			return
+		}
+
 		ua := c.Request.UserAgent()
 
-		// Simple signatures for common bots
+		// Known offensive scanner / scripting tool signatures.
+		// curl and wget are included because automated health-check traffic
+		// should use a proper UA or disable this toggle instead.
 		suspiciousAgents := []string{"sqlmap", "nikto", "nmap", "masscan", "python-requests", "curl", "wget"}
 
 		for _, agent := range suspiciousAgents {
@@ -215,7 +261,9 @@ func (fw *Firewall) BotDetector() gin.HandlerFunc {
 	}
 }
 
-// 2. Rate Limiter (With Fix for live updates)
+// 2. Rate Limiter
+// Uses Redis for persistent counters (survives container restarts).
+// Falls back to the in-memory rateLimitStore when Redis is unavailable.
 func (fw *Firewall) RateLimiter() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if c.Request.Method == "OPTIONS" {
@@ -223,7 +271,7 @@ func (fw *Firewall) RateLimiter() gin.HandlerFunc {
 			return
 		}
 
-		// SKIP Rate Limiting for Internal API calls (Dashboard Polling)
+		// Skip rate limiting for internal API calls (dashboard polling)
 		if strings.HasPrefix(c.Request.URL.Path, "/api") {
 			c.Next()
 			return
@@ -237,24 +285,54 @@ func (fw *Firewall) RateLimiter() gin.HandlerFunc {
 		isBlacklisted := fw.blacklist[clientIP]
 		fw.mutex.RUnlock()
 
-		// Allow Whitelisted IPs (UNLESS it is a Simulation)
-		// We trust localhost, but we want to allow the Simulator to test limits.
-		// The Simulator sends requests to /app, which is NOT /api.
 		if isWhitelisted && clientIP != "::1" && clientIP != "127.0.0.1" {
 			c.Next()
 			return
 		}
-
-		// For localhost, only allow if it's explicitly whitelisted AND NOT a simulation target?
-		// A simpler approach: Just treat localhost as a normal IP for rate limiting on the proxy path.
-		// This means we REMOVE the auto-whitelist for localhost in database.go?
-		// OR we just ignore whitelist logic here for localhost if we want to test it.
 
 		if isBlacklisted {
 			fw.respondBlocked(c, "IP is Blacklisted")
 			return
 		}
 
+		// ── Redis path ────────────────────────────────────────────────────────
+		if redisAvailable() {
+			key := fmt.Sprintf("waf:rl:%s", clientIP)
+			ctx := context.Background()
+
+			// Atomically increment counter
+			count, err := rdb.Incr(ctx, key).Result()
+			if err == nil {
+				// Set TTL only on the first increment (count == 1)
+				if count == 1 {
+					rdb.Expire(ctx, key, time.Duration(limitWindow)*time.Second)
+				}
+
+				if int(count) > limitMax {
+					// Log only on the first breach (count == limitMax+1)
+					if int(count) == limitMax+1 {
+						go LogSecurityEvent(SecurityEvent{
+							Type:      "RATE_LIMIT_EXCEEDED",
+							Severity:  "HIGH",
+							IP:        clientIP,
+							Path:      c.Request.URL.Path,
+							Method:    c.Request.Method,
+							UserAgent: c.Request.UserAgent(),
+							Details:   fmt.Sprintf("Rate limit exceeded (Redis counter: %d)", count),
+							Timestamp: time.Now(),
+						})
+					}
+					c.Header("Retry-After", strconv.Itoa(limitWindow))
+					fw.respondBlocked(c, "Too Many Requests")
+					return
+				}
+				c.Next()
+				return
+			}
+			// Redis error — fall through to in-memory path
+		}
+
+		// ── In-memory fallback ────────────────────────────────────────────────
 		fw.mutex.Lock()
 		entry, exists := fw.rateLimitStore[clientIP]
 
@@ -285,12 +363,12 @@ func (fw *Firewall) RateLimiter() gin.HandlerFunc {
 					Path:      c.Request.URL.Path,
 					Method:    c.Request.Method,
 					UserAgent: c.Request.UserAgent(),
-					Details:   "Rate limit exceeded",
+					Details:   "Rate limit exceeded (in-memory fallback)",
 					Timestamp: time.Now(),
 				})
 			}
 			fw.mutex.Unlock()
-			c.Header("Retry-After", "60")
+			c.Header("Retry-After", strconv.Itoa(limitWindow))
 			fw.respondBlocked(c, "Too Many Requests")
 			return
 		}
@@ -406,10 +484,44 @@ func (fw *Firewall) logThreat(c *gin.Context, threatType, details, payload, matc
 }
 
 func (fw *Firewall) respondBlocked(c *gin.Context, reason string) {
-	c.Header("Access-Control-Allow-Origin", "http://localhost:5173")
-	c.Header("Access-Control-Allow-Credentials", "true")
+	// Respect the same strict CORS allowlist as CORSMiddleware.
+	origin := c.Request.Header.Get("Origin")
+	if allowedOrigins[origin] {
+		c.Header("Access-Control-Allow-Origin", origin)
+		c.Header("Access-Control-Allow-Credentials", "true")
+	}
 	c.JSON(http.StatusForbidden, gin.H{"error": reason})
 	c.Abort()
+}
+
+// APIAuthMiddleware enforces API key authentication on all /api routes.
+// The expected key is read from the WAF_API_KEY environment variable.
+// Requests missing the header or supplying a wrong key receive 401 Unauthorized.
+func APIAuthMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Allow pre-flight OPTIONS through so CORS works for the dashboard.
+		if c.Request.Method == "OPTIONS" {
+			c.Next()
+			return
+		}
+
+		expectedKey := os.Getenv("WAF_API_KEY")
+		// If WAF_API_KEY is not configured, skip auth (allows easy local dev
+		// without breaking existing setups — set the var in production).
+		if expectedKey == "" {
+			c.Next()
+			return
+		}
+
+		providedKey := c.GetHeader("X-API-Key")
+		if providedKey == "" || providedKey != expectedKey {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized: invalid or missing API key"})
+			c.Abort()
+			return
+		}
+
+		c.Next()
+	}
 }
 
 // IP Management

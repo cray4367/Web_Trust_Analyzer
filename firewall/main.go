@@ -15,6 +15,8 @@ func main() {
 	godotenv.Load()
 	InitDB()
 	defer CloseDB()
+	InitRedis()
+	defer CloseRedis()
 
 	// 1. SETUP ROUTER
 	router := gin.Default()
@@ -31,6 +33,7 @@ func main() {
 		EnableSQLi:          true,
 		EnablePathTraversal: true,
 		BlockSuspicious:     true,
+		EnableBotDetection:  true, // toggle off via POST /api/config to allow curl/wget health checks
 	})
 
 	whitelist, _ := GetWhitelistFromDB()
@@ -49,6 +52,7 @@ func main() {
 	router.Use(fw.RequestLogger())
 
 	api := router.Group("/api")
+	api.Use(APIAuthMiddleware())
 	{
 		api.GET("/events", GetSecurityEvents)
 		api.GET("/events/:id", GetSecurityEvent)
@@ -99,22 +103,32 @@ func main() {
 	}
 }
 
+// allowedOrigins is the strict allowlist for CORS.
+// Only these two origins are permitted to make credentialed requests.
+var allowedOrigins = map[string]bool{
+	"http://localhost:80":   true,
+	"http://localhost:5173": true,
+}
+
 func CORSMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Allow any origin for development convenience (or specifically 5173, 3000, 3001)
 		origin := c.Request.Header.Get("Origin")
-		if origin != "" {
+
+		// Only echo the origin back if it is explicitly in the allowlist.
+		// Unknown origins get no CORS headers, so the browser blocks them.
+		if allowedOrigins[origin] {
 			c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
-		} else {
-			c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+			c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
+			c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With, X-API-Key")
+			c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE")
 		}
 
-		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
-		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE")
-
 		if c.Request.Method == "OPTIONS" {
-			c.AbortWithStatus(204)
+			if allowedOrigins[origin] {
+				c.AbortWithStatus(204)
+			} else {
+				c.AbortWithStatus(403)
+			}
 			return
 		}
 		c.Next()

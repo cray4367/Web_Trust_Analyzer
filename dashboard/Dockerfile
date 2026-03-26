@@ -7,6 +7,15 @@ COPY package*.json ./
 RUN npm install
 
 COPY . .
+
+# These ARGs are passed from docker-compose build.args and baked into the Vite bundle.
+ARG VITE_API_URL=/api
+ARG VITE_TARGET_URL=/
+ARG VITE_WAF_API_KEY=""
+ENV VITE_API_URL=$VITE_API_URL
+ENV VITE_TARGET_URL=$VITE_TARGET_URL
+ENV VITE_WAF_API_KEY=$VITE_WAF_API_KEY
+
 RUN npm run build
 
 # Production stage

@@ -1,13 +1,50 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"time"
 	"web-trust-analyzer/trust"
 
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 )
+
+// redisTrustKey returns the Redis key for a given IP's trust cache.
+const redisTrustTTL = 60 * time.Second
+
+func redisTrustKey(ip string) string {
+	return fmt.Sprintf("waf:trust:%s", ip)
+}
+
+// cacheTrustScore writes a trust score to Redis with a 60s TTL.
+// No-op when Redis is unavailable.
+func cacheTrustScore(ip string, score float64) {
+	if !redisAvailable() {
+		return
+	}
+	data, _ := json.Marshal(score)
+	rdb.Set(context.Background(), redisTrustKey(ip), data, redisTrustTTL)
+}
+
+// getCachedTrustScore retrieves a trust score from Redis.
+// Returns (score, true) on hit, (0, false) on miss or any error.
+func getCachedTrustScore(ip string) (float64, bool) {
+	if !redisAvailable() {
+		return 0, false
+	}
+	val, err := rdb.Get(context.Background(), redisTrustKey(ip)).Bytes()
+	if err == redis.Nil || err != nil {
+		return 0, false
+	}
+	var score float64
+	if json.Unmarshal(val, &score) != nil {
+		return 0, false
+	}
+	return score, true
+}
 
 // TrustScorer middleware calculates and tracks trust scores for all requests
 func (fw *Firewall) TrustScorer() gin.HandlerFunc {
@@ -32,8 +69,21 @@ func (fw *Firewall) TrustScorer() gin.HandlerFunc {
 		profile.LastSeen = time.Now()
 		profile.RequestCount++
 
-		// Calculate trust score using the trust engine
-		trustScore := trust.CalculateTrustScore(profile)
+		// Calculate trust score — use Redis cache when available to avoid
+		// redundant recalculation on every request for known IPs.
+		var trustScore trust.TrustScore
+		if cachedScore, ok := getCachedTrustScore(ip); ok {
+			// Reconstruct a lightweight TrustScore from the cached overall value
+			trustScore = trust.TrustScore{
+				OverallScore: cachedScore,
+				TrustLevel:   profile.Reputation,
+				Confidence:   1.0,
+			}
+		} else {
+			trustScore = trust.CalculateTrustScore(profile)
+			// Populate cache for subsequent requests
+			cacheTrustScore(ip, trustScore.OverallScore)
+		}
 
 		// Store in context for other middleware
 		c.Set("trust_profile", profile)
@@ -50,6 +100,9 @@ func (fw *Firewall) TrustScorer() gin.HandlerFunc {
 			if err := UpdateTrustProfile(profile); err != nil {
 				log.Printf("Error updating trust profile: %v", err)
 			}
+
+			// Refresh Redis cache after SQLite write
+			cacheTrustScore(ip, profile.TrustScore)
 
 			// Log significant trust changes
 			if abs(oldScore-trustScore.OverallScore) > 10 {
@@ -68,7 +121,9 @@ func (fw *Firewall) TrustScorer() gin.HandlerFunc {
 	}
 }
 
-// TrustBasedAccessControl applies different security policies based on trust level
+// TrustBasedAccessControl applies different security policies based on trust level.
+// New IPs (score 40-59, RequestCount < 20) enter a WARMING_UP phase with tighter
+// rate limits until they establish a clean request history.
 func (fw *Firewall) TrustBasedAccessControl() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		trustScoreVal, exists := c.Get("trust_score")
@@ -80,31 +135,47 @@ func (fw *Firewall) TrustBasedAccessControl() gin.HandlerFunc {
 		trustScore := trustScoreVal.(trust.TrustScore)
 		score := trustScore.OverallScore
 
+		// Pull request count from the profile stored in context.
+		var requestCount int
+		if profileVal, ok := c.Get("trust_profile"); ok {
+			if profile, ok := profileVal.(*trust.TrustProfile); ok {
+				requestCount = profile.RequestCount
+			}
+		}
+
+		// Warm-up threshold: require 20 clean requests before granting full NEUTRAL limits.
+		const warmupThreshold = 20
+
 		switch {
 		case score >= 80:
-			// Highly trusted - fast track
+			// Highly trusted — fast track with doubled rate limits
 			c.Set("rate_limit_multiplier", 2.0)
 			c.Set("skip_extra_checks", true)
 			c.Header("X-Trust-Level", "HIGHLY_TRUSTED")
 
 		case score >= 60:
-			// Trusted - normal flow
+			// Trusted — normal flow
 			c.Set("rate_limit_multiplier", 1.0)
 			c.Header("X-Trust-Level", "TRUSTED")
 
-		case score >= 40:
-			// Neutral - standard security
+		case score >= 40 && requestCount >= warmupThreshold:
+			// Neutral with established history — standard security
 			c.Set("rate_limit_multiplier", 0.8)
 			c.Header("X-Trust-Level", "NEUTRAL")
 
+		case score >= 40 && requestCount < warmupThreshold:
+			// Neutral score but brand-new IP — half rate limits until warmed up
+			c.Set("rate_limit_multiplier", 0.5)
+			c.Header("X-Trust-Level", "WARMING_UP")
+
 		case score >= 20:
-			// Suspicious - extra validation
+			// Suspicious — extra validation required
 			c.Set("rate_limit_multiplier", 0.5)
 			c.Set("require_extra_validation", true)
 			c.Header("X-Trust-Level", "SUSPICIOUS")
 
 		default:
-			// Malicious - block or heavy challenge
+			// Malicious — block outright
 			fw.logThreat(c, "LOW_TRUST_SCORE",
 				fmt.Sprintf("Trust score: %.2f - %s", score, trustScore.TrustLevel),
 				"", "", "BLOCKED")

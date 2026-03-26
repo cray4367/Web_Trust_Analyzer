@@ -4,7 +4,14 @@ import { TrustScoreGauge, TrustDistributionChart, TrustProfileCard, TrustStatsCa
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const ATTACK_TARGET = import.meta.env.VITE_TARGET_URL || '/app';
+const WAF_API_KEY = import.meta.env.VITE_WAF_API_KEY || '';
 
+// Shared fetch headers — automatically includes X-API-Key when set
+const apiHeaders = (extra = {}) => ({
+  'Content-Type': 'application/json',
+  ...(WAF_API_KEY ? { 'X-API-Key': WAF_API_KEY } : {}),
+  ...extra,
+});
 
 const Dashboard = () => {
   const [stats, setStats] = useState(null);
@@ -29,13 +36,13 @@ const Dashboard = () => {
   const fetchData = async () => {
     try {
       const [statsRes, eventsRes, threatsRes, configRes, trustStatsRes, trustDistRes] = await Promise.all([
-        fetch(`${API_BASE}/events/stats`),
-        fetch(`${API_BASE}/events?limit=20`),
-        fetch(`${API_BASE}/monitor/threats`),
-        fetch(`${API_BASE}/config`),
-        fetch(`${API_BASE}/ratelimit/status`),
-        fetch(`${API_BASE}/trust/stats`),
-        fetch(`${API_BASE}/trust/distribution`)
+        fetch(`${API_BASE}/events/stats`, { headers: apiHeaders() }),  // 1 → statsRes
+        fetch(`${API_BASE}/events?limit=20`, { headers: apiHeaders() }),  // 2 → eventsRes
+        fetch(`${API_BASE}/monitor/threats`, { headers: apiHeaders() }),  // 3 → threatsRes
+        fetch(`${API_BASE}/config`, { headers: apiHeaders() }),  // 4 → configRes
+        fetch(`${API_BASE}/trust/stats`, { headers: apiHeaders() }),  // 5 → trustStatsRes
+        fetch(`${API_BASE}/trust/distribution`, { headers: apiHeaders() }),  // 6 → trustDistRes
+        // ratelimit/status is fetched separately below — keep it out to avoid the off-by-one
       ]);
 
       if (statsRes.ok) setStats(await statsRes.json());
@@ -49,7 +56,7 @@ const Dashboard = () => {
         setIsSecure(config.enable_sqli || config.enable_xss);
       }
 
-      const rateLimitRes = await fetch(`${API_BASE}/ratelimit/status`);
+      const rateLimitRes = await fetch(`${API_BASE}/ratelimit/status`, { headers: apiHeaders() });
       if (rateLimitRes.ok) {
         const data = await rateLimitRes.json();
         if (data.config) setRateLimitConfig(data.config);
@@ -75,7 +82,7 @@ const Dashboard = () => {
       if (profileFilter === 'trusted') endpoint = '/trust/top-trusted?limit=20';
       if (profileFilter === 'suspicious') endpoint = '/trust/suspicious?limit=20';
 
-      const res = await fetch(`${API_BASE}${endpoint}`);
+      const res = await fetch(`${API_BASE}${endpoint}`, { headers: apiHeaders() });
       if (res.ok) {
         const data = await res.json();
         setTrustProfiles(data.profiles || []);
@@ -118,7 +125,7 @@ const Dashboard = () => {
     try {
       await fetch(`${API_BASE}/config`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: apiHeaders(),
         body: JSON.stringify({
           rate_limit_window: 60,
           rate_limit_max: 100,
@@ -141,7 +148,7 @@ const Dashboard = () => {
     try {
       const res = await fetch(`${API_BASE}/attack/simulate`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: apiHeaders(),
         body: JSON.stringify({
           type: type,
           intensity: type === 'FLOOD' ? 200 : 1
@@ -182,7 +189,7 @@ const Dashboard = () => {
     try {
       const res = await fetch(`${API_BASE}/ratelimit/config`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: apiHeaders(),
         body: JSON.stringify({ window_seconds: windowSeconds, max_requests: maxRequests })
       });
 

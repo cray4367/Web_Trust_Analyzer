@@ -25,6 +25,10 @@ type FirewallConfig struct {
 	EnableXSS           bool `json:"enable_xss"`
 	EnableSQLi          bool `json:"enable_sqli"`
 	EnablePathTraversal bool `json:"enable_path_traversal"`
+	EnableCmdInjection  bool `json:"enable_cmd_injection"`
+	EnableNoSQLi        bool `json:"enable_nosqli"`
+	EnableLFI           bool `json:"enable_lfi"`
+	EnableSSRF          bool `json:"enable_ssrf"`
 	BlockSuspicious     bool `json:"block_suspicious"`
 	EnableBotDetection  bool `json:"enable_bot_detection"`
 }
@@ -38,6 +42,10 @@ type Firewall struct {
 	sqlPatterns           []*regexp.Regexp
 	xssPatterns           []*regexp.Regexp
 	pathTraversalPatterns []*regexp.Regexp
+	cmdPatterns           []*regexp.Regexp
+	nosqlPatterns         []*regexp.Regexp
+	lfiPatterns           []*regexp.Regexp
+	ssrfPatterns          []*regexp.Regexp
 }
 
 type RateLimitEntry struct {
@@ -107,6 +115,34 @@ func NewFirewall(config FirewallConfig) *Firewall {
 		regexp.MustCompile(`(?i)\\u002e\\u002e`),
 		// Null-byte injection often paired with traversal
 		regexp.MustCompile(`%00`),
+	}
+
+	// Command Injection Patterns
+	fw.cmdPatterns = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)(;|\||\|\||&&|\n|\r)\s*(ls|cat|pwd|whoami|id|ping|curl|wget|nc|netcat|bash|sh|zsh)`),
+		regexp.MustCompile(`(?i)\$\(.*\)`),
+		regexp.MustCompile(`(?i)\x60.*\x60`), // Backticks
+	}
+
+	// NoSQL Injection Patterns
+	fw.nosqlPatterns = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)\$ne`),
+		regexp.MustCompile(`(?i)\$gt`),
+		regexp.MustCompile(`(?i)\$lt`),
+		regexp.MustCompile(`(?i)\$where`),
+		regexp.MustCompile(`(?i)typeof\s*==`),
+	}
+
+	// LFI/RFI Patterns
+	fw.lfiPatterns = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)(/etc/passwd|/etc/shadow|/etc/issue|/boot\.ini|/windows/win\.ini)`),
+		regexp.MustCompile(`(?i)(php://|file://|expect://|data://|zip://)`),
+	}
+
+	// SSRF Patterns (Internal IPs & Cloud Metadata)
+	fw.ssrfPatterns = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)(http|https|ftp)://(localhost|127\.0\.0|0\.0\.0|169\.254\.169\.254)`),
+		regexp.MustCompile(`(?i)(http|https|ftp)://(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.)`),
 	}
 
 	return fw
@@ -214,6 +250,138 @@ func (fw *Firewall) ThreatDetector() gin.HandlerFunc {
 			}
 		}
 
+		// CHECK CMD INJECTION
+		if match, pattern := fw.checkCmdInjection(bodyString); match {
+			status := "BLOCKED"
+			if !fw.config.EnableCmdInjection {
+				status = "PASSED"
+			}
+			fw.logThreat(c, "CMD_INJECTION", "Command injection detected in body", bodyString, pattern, status)
+
+			UpdateTrustAfterThreatDetection(c, "CMD_INJECTION")
+
+			if fw.config.EnableCmdInjection {
+				fw.respondBlocked(c, "Command Injection Detected")
+				return
+			}
+		}
+
+		for _, values := range c.Request.URL.Query() {
+			for _, value := range values {
+				if match, pattern := fw.checkCmdInjection(value); match {
+					status := "BLOCKED"
+					if !fw.config.EnableCmdInjection {
+						status = "PASSED"
+					}
+					fw.logThreat(c, "CMD_INJECTION", "Command injection detected in URL", value, pattern, status)
+
+					if fw.config.EnableCmdInjection {
+						fw.respondBlocked(c, "Command Injection Detected")
+						return
+					}
+				}
+			}
+		}
+
+		// CHECK NOSQL INJECTION
+		if match, pattern := fw.checkNoSQLInjection(bodyString); match {
+			status := "BLOCKED"
+			if !fw.config.EnableNoSQLi {
+				status = "PASSED"
+			}
+			fw.logThreat(c, "NOSQL_INJECTION", "NoSQL injection detected in body", bodyString, pattern, status)
+
+			UpdateTrustAfterThreatDetection(c, "NOSQL_INJECTION")
+
+			if fw.config.EnableNoSQLi {
+				fw.respondBlocked(c, "NoSQL Injection Detected")
+				return
+			}
+		}
+
+		for _, values := range c.Request.URL.Query() {
+			for _, value := range values {
+				if match, pattern := fw.checkNoSQLInjection(value); match {
+					status := "BLOCKED"
+					if !fw.config.EnableNoSQLi {
+						status = "PASSED"
+					}
+					fw.logThreat(c, "NOSQL_INJECTION", "NoSQL injection detected in URL", value, pattern, status)
+
+					if fw.config.EnableNoSQLi {
+						fw.respondBlocked(c, "NoSQL Injection Detected")
+						return
+					}
+				}
+			}
+		}
+
+		// CHECK LFI
+		if match, pattern := fw.checkLFI(bodyString); match {
+			status := "BLOCKED"
+			if !fw.config.EnableLFI {
+				status = "PASSED"
+			}
+			fw.logThreat(c, "LFI_ATTEMPT", "Local File Inclusion detected in body", bodyString, pattern, status)
+
+			UpdateTrustAfterThreatDetection(c, "LFI_ATTEMPT")
+
+			if fw.config.EnableLFI {
+				fw.respondBlocked(c, "Local File Inclusion Detected")
+				return
+			}
+		}
+
+		for _, values := range c.Request.URL.Query() {
+			for _, value := range values {
+				if match, pattern := fw.checkLFI(value); match {
+					status := "BLOCKED"
+					if !fw.config.EnableLFI {
+						status = "PASSED"
+					}
+					fw.logThreat(c, "LFI_ATTEMPT", "Local File Inclusion detected in URL", value, pattern, status)
+
+					if fw.config.EnableLFI {
+						fw.respondBlocked(c, "Local File Inclusion Detected")
+						return
+					}
+				}
+			}
+		}
+
+		// CHECK SSRF
+		if match, pattern := fw.checkSSRF(bodyString); match {
+			status := "BLOCKED"
+			if !fw.config.EnableSSRF {
+				status = "PASSED"
+			}
+			fw.logThreat(c, "SSRF_ATTEMPT", "Server-Side Request Forgery detected in body", bodyString, pattern, status)
+
+			UpdateTrustAfterThreatDetection(c, "SSRF_ATTEMPT")
+
+			if fw.config.EnableSSRF {
+				fw.respondBlocked(c, "SSRF Detected")
+				return
+			}
+		}
+
+		for _, values := range c.Request.URL.Query() {
+			for _, value := range values {
+				if match, pattern := fw.checkSSRF(value); match {
+					status := "BLOCKED"
+					if !fw.config.EnableSSRF {
+						status = "PASSED"
+					}
+					fw.logThreat(c, "SSRF_ATTEMPT", "Server-Side Request Forgery detected in URL", value, pattern, status)
+
+					if fw.config.EnableSSRF {
+						fw.respondBlocked(c, "SSRF Detected")
+						return
+					}
+				}
+			}
+		}
+
 		// If we reach here, request is clean - update trust positively
 		UpdateTrustAfterCleanRequest(c)
 
@@ -285,7 +453,7 @@ func (fw *Firewall) RateLimiter() gin.HandlerFunc {
 		isBlacklisted := fw.blacklist[clientIP]
 		fw.mutex.RUnlock()
 
-		if isWhitelisted && clientIP != "::1" && clientIP != "127.0.0.1" {
+		if isWhitelisted {
 			c.Next()
 			return
 		}
@@ -319,11 +487,11 @@ func (fw *Firewall) RateLimiter() gin.HandlerFunc {
 							Method:    c.Request.Method,
 							UserAgent: c.Request.UserAgent(),
 							Details:   fmt.Sprintf("Rate limit exceeded (Redis counter: %d)", count),
-							Timestamp: time.Now(),
+							Timestamp:    time.Now(),
 						})
 					}
 					c.Header("Retry-After", strconv.Itoa(limitWindow))
-					fw.respondBlocked(c, "Too Many Requests")
+					c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "Too Many Requests"})
 					return
 				}
 				c.Next()
@@ -369,7 +537,7 @@ func (fw *Firewall) RateLimiter() gin.HandlerFunc {
 			}
 			fw.mutex.Unlock()
 			c.Header("Retry-After", strconv.Itoa(limitWindow))
-			fw.respondBlocked(c, "Too Many Requests")
+			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "Too Many Requests"})
 			return
 		}
 
@@ -460,6 +628,42 @@ func (fw *Firewall) checkXSS(input string) (bool, string) {
 
 func (fw *Firewall) checkPathTraversal(input string) (bool, string) {
 	for _, pattern := range fw.pathTraversalPatterns {
+		if pattern.MatchString(input) {
+			return true, pattern.String()
+		}
+	}
+	return false, ""
+}
+
+func (fw *Firewall) checkCmdInjection(input string) (bool, string) {
+	for _, pattern := range fw.cmdPatterns {
+		if pattern.MatchString(input) {
+			return true, pattern.String()
+		}
+	}
+	return false, ""
+}
+
+func (fw *Firewall) checkNoSQLInjection(input string) (bool, string) {
+	for _, pattern := range fw.nosqlPatterns {
+		if pattern.MatchString(input) {
+			return true, pattern.String()
+		}
+	}
+	return false, ""
+}
+
+func (fw *Firewall) checkLFI(input string) (bool, string) {
+	for _, pattern := range fw.lfiPatterns {
+		if pattern.MatchString(input) {
+			return true, pattern.String()
+		}
+	}
+	return false, ""
+}
+
+func (fw *Firewall) checkSSRF(input string) (bool, string) {
+	for _, pattern := range fw.ssrfPatterns {
 		if pattern.MatchString(input) {
 			return true, pattern.String()
 		}

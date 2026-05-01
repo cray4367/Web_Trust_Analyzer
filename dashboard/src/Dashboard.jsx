@@ -21,7 +21,7 @@ const Dashboard = () => {
   const [loading, setLoading] = useState(true);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [isSecure, setIsSecure] = useState(true);
-  const [rateLimitConfig, setRateLimitConfig] = useState({ window_seconds: 60, max_requests: 100 });
+  const [rateLimitConfig, setRateLimitConfig] = useState({ window_seconds: 60, max_requests: 30 });
 
   // New state for Attack Console
   const [attackLogs, setAttackLogs] = useState([]);
@@ -133,6 +133,10 @@ const Dashboard = () => {
           enable_xss: newState,
           enable_sqli: newState,
           enable_path_traversal: newState,
+          enable_cmd_injection: newState,
+          enable_nosqli: newState,
+          enable_lfi: newState,
+          enable_ssrf: newState,
           block_suspicious: newState
         })
       });
@@ -303,8 +307,12 @@ const Dashboard = () => {
       { id: 1, name: "SQL Injection", type: "SQL_INJECTION", desc: "Injects malicious SQL query" },
       { id: 2, name: "Cross-Site Scripting", type: "XSS", desc: "Injects malicious scripts" },
       { id: 3, name: "Path Traversal", type: "PATH_TRAVERSAL", desc: "Access unauthorized files" },
-      { id: 4, name: "Botnet Attack", type: "BOT", desc: "Simulates suspicious User-Agents" },
-      { id: 5, name: "DDoS Simulation", type: "FLOOD", desc: "High concurrency request flood" },
+      { id: 4, name: "Command Injection", type: "CMD_INJECTION", desc: "Executes system commands" },
+      { id: 5, name: "NoSQL Injection", type: "NOSQL_INJECTION", desc: "NoSQL DB operator bypass" },
+      { id: 6, name: "Local File Inclusion", type: "LFI", desc: "Access local server files" },
+      { id: 7, name: "Server-Side Request Forgery", type: "SSRF", desc: "Internal port scanning" },
+      { id: 8, name: "Botnet Attack", type: "BOT", desc: "Simulates suspicious User-Agents" },
+      { id: 9, name: "DDoS Simulation", type: "FLOOD", desc: "High concurrency request flood" },
     ];
 
     return (
@@ -623,6 +631,7 @@ const Dashboard = () => {
         .owasp-card:hover { transform: translateY(-2px); border-color: #00f5ff; }
         .owasp-number { font-size: 2rem; font-weight: 700; background: linear-gradient(135deg, #00f5ff, #0080ff); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
         .owasp-name { font-size: 1rem; color: #e0e7ff; margin-bottom: 0.5rem; font-weight: bold; }
+        .owasp-desc { font-size: 0.8rem; color: #64748b; margin-bottom: 1rem; }
         .owasp-status { display: flex; align-items: center; gap: 0.5rem; font-size: 0.75rem; color: #64748b; text-transform: uppercase; }
         .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #66bb6a; box-shadow: 0 0 8px #66bb6a; animation: blink 2s ease-in-out infinite; }
         @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }

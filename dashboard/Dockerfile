@@ -18,12 +18,16 @@ ENV VITE_WAF_API_KEY=$VITE_WAF_API_KEY
 
 RUN npm run build
 
-# Production stage
-FROM nginx:alpine
+# Production stage - use Node.js to serve static files instead of nginx
+FROM node:22-alpine
 
-COPY --from=builder /app/dist /usr/share/nginx/html
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+WORKDIR /app
 
-EXPOSE 80
+# Install serve package to serve static files
+RUN npm install -g serve
 
-CMD ["nginx", "-g", "daemon off;"]
+COPY --from=builder /app/dist /app/dist
+
+EXPOSE 3001
+
+CMD ["serve", "-s", "/app/dist", "-l", "3001"]

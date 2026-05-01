@@ -48,6 +48,14 @@ func SimulateAttack(c *gin.Context) {
 		result = runXSSAttack()
 	case "PATH_TRAVERSAL":
 		result = runPathTraversalAttack()
+	case "CMD_INJECTION":
+		result = runCmdInjectionAttack()
+	case "NOSQL_INJECTION":
+		result = runNoSQLInjectionAttack()
+	case "LFI":
+		result = runLFIAttack()
+	case "SSRF":
+		result = runSSRFAttack()
 	case "BOT":
 		result = runBotAttack()
 	case "FLOOD":
@@ -93,6 +101,43 @@ func runPathTraversalAttack() AttackResult {
 	}
 
 	return runPayloadAttack("PATH_TRAVERSAL", payloads)
+}
+
+func runCmdInjectionAttack() AttackResult {
+	payloads := []string{
+		"; ls -la",
+		"| cat /etc/passwd",
+		"`whoami`",
+	}
+
+	return runPayloadAttack("CMD_INJECTION", payloads)
+}
+
+func runNoSQLInjectionAttack() AttackResult {
+	payloads := []string{
+		"{$ne: 1}",
+		"{$gt: \"\"}",
+	}
+
+	return runPayloadAttack("NOSQL_INJECTION", payloads)
+}
+
+func runLFIAttack() AttackResult {
+	payloads := []string{
+		"../../etc/passwd",
+		"php://filter/resource=index.php",
+	}
+
+	return runPayloadAttack("LFI_ATTEMPT", payloads)
+}
+
+func runSSRFAttack() AttackResult {
+	payloads := []string{
+		"http://169.254.169.254/latest/meta-data/",
+		"http://localhost:8080/admin",
+	}
+
+	return runPayloadAttack("SSRF_ATTEMPT", payloads)
 }
 
 func runPayloadAttack(attackType string, payloads []string) AttackResult {
@@ -186,13 +231,17 @@ func runFloodAttack(count int) AttackResult {
 	var blocked, passed, errors int
 	var mu sync.Mutex
 
-	client := &http.Client{Timeout: 2 * time.Second}
-
-	// Create a custom Transport to allow high concurrency
-	t := http.DefaultTransport.(*http.Transport).Clone()
-	t.MaxIdleConns = 100
-	t.MaxConnsPerHost = 100
-	client.Transport = t
+	// Create a custom Transport with higher connection limits for flood testing
+	t := &http.Transport{
+		MaxIdleConns:        200,
+		MaxIdleConnsPerHost: 200,
+		MaxConnsPerHost:     200,
+		DisableKeepAlives:   false,
+	}
+	client := &http.Client{
+		Timeout:   5 * time.Second, // Increased timeout to reduce connection errors
+		Transport: t,
+	}
 
 	startTime := time.Now()
 
@@ -209,6 +258,7 @@ func runFloodAttack(count int) AttackResult {
 				errors++
 				return
 			}
+			defer resp.Body.Close()
 
 			if resp.StatusCode == 429 || resp.StatusCode == 403 { // 429 Too Many Requests
 				blocked++

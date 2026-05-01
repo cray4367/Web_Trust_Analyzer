@@ -183,7 +183,7 @@ Configure via the dashboard or directly in the database:
 
 ```go
 RateLimitWindow:   60,  // seconds
-RateLimitMax:      100, // requests per window
+RateLimitMax:      30,  // requests per window (lower for easier DDoS testing)
 ```
 
 ### OWASP Protection Toggles
@@ -251,12 +251,13 @@ curl "http://localhost:8080/app?search=<script>alert('xss')</script>"
 curl "http://localhost:8080/app/../../etc/passwd"
 ```
 
-### Test Rate Limiting
+### Test Rate Limiting (DDoS Simulation)
 
 ```bash
-# Exceed the rate limit
-for i in {1..150}; do
-  curl "http://localhost:8080/app"
+# Exceed the rate limit (30 requests per 60 seconds)
+# Send 50 requests rapidly - last 20 should return 429
+for i in {1..50}; do
+  curl -s -o /dev/null -w "Request $i: %{http_code}\n" "http://localhost:8080/"
 done
 ```
 

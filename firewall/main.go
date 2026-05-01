@@ -27,11 +27,15 @@ func main() {
 
 	fw = NewFirewall(FirewallConfig{
 		RateLimitWindow:     60,
-		RateLimitMax:        100,
+		RateLimitMax:        30,  // Lower limit for easier DDoS testing
 		EnableCSRF:          true,
 		EnableXSS:           true,
 		EnableSQLi:          true,
 		EnablePathTraversal: true,
+		EnableCmdInjection:  true,
+		EnableNoSQLi:        true,
+		EnableLFI:           true,
+		EnableSSRF:          true,
 		BlockSuspicious:     true,
 		EnableBotDetection:  true, // toggle off via POST /api/config to allow curl/wget health checks
 	})
@@ -40,6 +44,11 @@ func main() {
 	for _, ip := range whitelist {
 		fw.AddToWhitelist(ip)
 	}
+	
+	// Whitelist localhost only - Docker gateway IPs are NOT whitelisted
+	// so that rate limiting works for external requests.
+	fw.AddToWhitelist("127.0.0.1")
+	fw.AddToWhitelist("::1")
 
 	// Trust scoring middleware (first to track all requests)
 	router.Use(fw.TrustScorer())
@@ -55,8 +64,8 @@ func main() {
 	api.Use(APIAuthMiddleware())
 	{
 		api.GET("/events", GetSecurityEvents)
+		api.GET("/events/stats", GetEventStats) // MUST be before /:id so Gin doesn't swallow it
 		api.GET("/events/:id", GetSecurityEvent)
-		api.GET("/events/stats", GetEventStats)
 		api.GET("/ratelimit/status", GetRateLimitStatus)
 		api.POST("/ratelimit/config", UpdateRateLimitConfig)
 		api.GET("/ratelimit/blocked", GetBlockedIPs)
@@ -92,9 +101,11 @@ func main() {
 	// Handle all other traffic (Proxy to target)
 	router.NoRoute(fw.ProxyMiddleware(targetURL))
 
-	// 4. SET FIREWALL PORT TO 8080
-	// This ensures it doesn't clash with Vite (5173) or React (3001)
-	port := "8080"
+	// 4. SET FIREWALL PORT (respects PORT env var, defaults to 8080)
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
 
 	fmt.Printf("🛡️  Web Trust Analyzer Firewall starting on port %s\n", port)
 
@@ -107,7 +118,8 @@ func main() {
 // Only these two origins are permitted to make credentialed requests.
 var allowedOrigins = map[string]bool{
 	"http://localhost:80":   true,
-	"http://localhost:5173": true,
+	"http://localhost:3001": true, // Dashboard container port
+	"http://localhost:5173": true, // Vite dev server
 }
 
 func CORSMiddleware() gin.HandlerFunc {

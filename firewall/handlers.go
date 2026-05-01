@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"net/http"
 	"strconv"
 
@@ -34,17 +35,29 @@ func GetSecurityEvent(c *gin.Context) {
 	id := c.Param("id")
 
 	var event SecurityEvent
-	query := `SELECT id, type, severity, ip, path, method, user_agent, details, payload, timestamp 
+	var matchPattern sql.NullString
+	var status sql.NullString
+	query := `SELECT id, type, severity, ip, path, method, user_agent, details, payload, match_pattern, status, timestamp 
               FROM security_events WHERE id = ?`
 
 	err := db.QueryRow(query, id).Scan(
 		&event.ID, &event.Type, &event.Severity, &event.IP, &event.Path,
-		&event.Method, &event.UserAgent, &event.Details, &event.Payload, &event.Timestamp,
+		&event.Method, &event.UserAgent, &event.Details, &event.Payload,
+		&matchPattern, &status, &event.Timestamp,
 	)
 
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Event not found"})
 		return
+	}
+
+	if matchPattern.Valid {
+		event.MatchPattern = matchPattern.String
+	}
+	if status.Valid {
+		event.Status = status.String
+	} else {
+		event.Status = "BLOCKED"
 	}
 
 	c.JSON(http.StatusOK, event)
